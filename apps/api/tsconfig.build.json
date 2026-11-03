@@ -1,0 +1,6 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": { "outDir": "../../dist", "rootDir": "../.." },
+  "include": ["src/main.ts", "src/migrate.ts"],
+  "exclude": ["src/dev.ts", "node_modules"]
+}

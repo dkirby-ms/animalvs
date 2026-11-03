@@ -1,0 +1,36 @@
+{
+  "name": "animalvs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": ["apps/*", "packages/*"],
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "dev:api": "node --env-file-if-exists=.env --import tsx apps/api/src/dev.ts",
+    "dev:web": "npm run dev -w @animalvs/web",
+    "migrate": "node --env-file-if-exists=.env --import tsx apps/api/src/migrate.ts",
+    "typecheck": "tsc --noEmit && vue-tsc --noEmit -p apps/web/tsconfig.json",
+    "build": "tsc -p apps/api/tsconfig.build.json && npm run build -w @animalvs/web",
+    "start": "node --env-file-if-exists=.env dist/apps/api/src/main.js",
+    "test": "node --import tsx --test tests/contracts.test.ts && node scripts/test-postgres.mjs",
+    "test:integration": "node --import tsx --test tests/platform.test.ts",
+    "test:browser": "node scripts/test-postgres.mjs --browser",
+    "test:production": "node scripts/check-production.mjs"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "express": "^5.1.0",
+    "helmet": "^8.1.0",
+    "jose": "^6.1.0",
+    "pg": "^8.16.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.0",
+    "@types/express": "^5.0.0",
+    "@types/node": "^24.0.0",
+    "@types/pg": "^8.15.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}

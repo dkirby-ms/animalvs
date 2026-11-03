@@ -1,0 +1,14 @@
+
+> animalvs@0.1.0 test:browser
+> node scripts/test-postgres.mjs --browser
+
+
+Running 4 tests using 1 worker
+
+  ✓  1 tests/browser/player.spec.ts:3:1 › saved profile survives sign-out/reload and never crosses accounts (857ms)
+  ✓  2 tests/browser/player.spec.ts:26:1 › lost stream is visible and reconnect recovers the server snapshot (2.6s)
+  ✓  3 tests/browser/player.spec.ts:38:1 › unavailable progress never renders fabricated local state (269ms)
+[WebServer] {"timestamp":"2026-11-03T21:02:03.890Z","severity_text":"ERROR","severity_number":17,"body":"Application data was deleted. Contact support before creating another account.","attributes":{"error.type":"account_deleted","request.id":"81b75c55-f8af-46f7-9372-7aab2bba9063"}}
+  ✓  4 tests/browser/player.spec.ts:49:1 › deletion requires explicit confirmation and removes application access (419ms)
+
+  4 passed (6.9s)

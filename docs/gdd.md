@@ -592,13 +592,16 @@ No sound is necessary to understand a result.
 
 Use a browser client for interface and replay presentation, plus an authoritative
 backend for matchmaking, CPU profiles, simulation, accounts, and base progression.
-Use Microsoft Entra
-External ID with OAuth 2.0/OpenID Connect for player authentication. Local
-development may provide an explicit authentication bypass, but it must be
-unavailable in production and must not create production-valid identities.
+Use Microsoft Entra External ID with OAuth 2.0/OpenID Connect for player
+authentication, targeting an existing external tenant. For local development,
+use a simulated identity behind an explicit development-only flag. It must be
+impossible to enable in production and must not create production-valid
+identities.
 
-Target a small private beta with minimal monthly hosting costs. The cloud
-provider, cost ceiling, framework, and renderer remain undecided.
+Target a small private beta with minimal monthly hosting costs. Azure and a
+proposed ceiling of $50 USD per month were selected for review; the budget is
+not approved and must be validated against the beta workload. The framework and
+renderer remain undecided.
 
 The proposed first release requires accounts for saved progression. Avoid guest
 progress until account recovery and migration rules are designed.
@@ -777,8 +780,10 @@ without making welfare upkeep feel like a daily chore.
 * Weather-specific queue fragmentation and regional/server pool sizing
 * Whether facility disparities in level-only matchmaking justify bonus caps
   changing after playtests
-* Specific cloud provider and monthly private-beta cost ceiling
-* Authentication configuration and local development bypass implementation
+* Validation of the proposed Azure provider and $50 USD/month ceiling against
+  the private-beta workload
+* Existing Entra External ID tenant integration and local-only simulated
+  identity guardrails
 * Specific representative Android test model
 * Regional age, privacy, consent, and backup-retention review before public launch
 * Whether playtests justify an equal-level mode after the first release

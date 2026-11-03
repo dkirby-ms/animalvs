@@ -1,0 +1,54 @@
+
+> animalvs@0.1.0 test
+> node --import tsx --test tests/contracts.test.ts && node scripts/test-postgres.mjs
+
+✔ strict intents reject every authoritative field family (3.460289ms)
+✔ local identity is explicit and restricted to a dedicated loopback database (2.300917ms)
+✔ hosted configuration pins JWKS origin and excludes local data (0.432877ms)
+✔ production entrypoint cannot import local credentials (8.243262ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 4
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 316.065654
+{"timestamp":"2026-11-03T21:01:57.645Z","severity_text":"ERROR","severity_number":17,"body":"Sign in.","attributes":{"error.type":"unauthenticated","request.id":"c5900fb3-5e65-417e-905d-ab23be3a7ddd"}}
+{"timestamp":"2026-11-03T21:01:57.649Z","severity_text":"ERROR","severity_number":17,"body":"This endpoint does not accept query parameters.","attributes":{"error.type":"invalid_query","request.id":"5d8f1802-543a-44c6-b50b-3b9b84845095"}}
+{"timestamp":"2026-11-03T21:01:57.672Z","severity_text":"ERROR","severity_number":17,"body":"The request is invalid or contains unsupported fields.","attributes":{"error.type":"invalid_request","request.id":"9d582539-a25e-4c49-a743-ec0471f6ff23"}}
+{"timestamp":"2026-11-03T21:01:57.677Z","severity_text":"ERROR","severity_number":17,"body":"The request is invalid or contains unsupported fields.","attributes":{"error.type":"invalid_request","request.id":"c1f17199-11cc-4824-965e-bb84d5ba3a8e"}}
+{"timestamp":"2026-11-03T21:01:57.683Z","severity_text":"ERROR","severity_number":17,"body":"The request is invalid or contains unsupported fields.","attributes":{"error.type":"invalid_request","request.id":"b3e87029-6805-4b5d-8b47-2a48a948597f"}}
+{"timestamp":"2026-11-03T21:01:57.688Z","severity_text":"ERROR","severity_number":17,"body":"The request is invalid or contains unsupported fields.","attributes":{"error.type":"invalid_request","request.id":"32e5951f-ac2f-498b-8b30-e3aabf74d923"}}
+{"timestamp":"2026-11-03T21:01:57.695Z","severity_text":"ERROR","severity_number":17,"body":"The request is invalid or contains unsupported fields.","attributes":{"error.type":"invalid_request","request.id":"09cb49bd-4fe4-4041-842a-8c5b3ccf8533"}}
+{"timestamp":"2026-11-03T21:01:57.699Z","severity_text":"ERROR","severity_number":17,"body":"The request is invalid or contains unsupported fields.","attributes":{"error.type":"invalid_request","request.id":"f4f99c5c-d47c-4a4b-ac6b-e8e60561cbe4"}}
+{"timestamp":"2026-11-03T21:01:57.705Z","severity_text":"ERROR","severity_number":17,"body":"The request is invalid or contains unsupported fields.","attributes":{"error.type":"invalid_request","request.id":"7bcaa5c8-edd8-4daf-8d18-63f79776824c"}}
+{"timestamp":"2026-11-03T21:01:57.710Z","severity_text":"ERROR","severity_number":17,"body":"API operation is unavailable.","attributes":{"error.type":"not_found","request.id":"4ac1187c-9055-4489-97a4-6b8d6f2d2286"}}
+{"timestamp":"2026-11-03T21:01:57.715Z","severity_text":"ERROR","severity_number":17,"body":"API operation is unavailable.","attributes":{"error.type":"not_found","request.id":"6988ccfc-a611-47b6-9f21-b0fe8cd461c5"}}
+{"timestamp":"2026-11-03T21:01:57.720Z","severity_text":"ERROR","severity_number":17,"body":"API operation is unavailable.","attributes":{"error.type":"not_found","request.id":"56c302b0-5484-48c7-ac8b-51e3265fea24"}}
+✔ stable identity, initial six animals, explicit unauthenticated and tampering errors (198.227554ms)
+{"timestamp":"2026-11-03T21:01:57.747Z","severity_text":"ERROR","severity_number":17,"body":"Transaction ID was already used for a different action.","attributes":{"error.type":"idempotency_conflict","request.id":"9303e696-771e-4ade-835b-087e0166cfd1"}}
+{"timestamp":"2026-11-03T21:01:57.752Z","severity_text":"ERROR","severity_number":17,"body":"Progress changed. Reload before trying again.","attributes":{"error.type":"stale_action","request.id":"88ad5c6b-667e-4197-80e0-572a452b943f"}}
+✔ management is idempotent, stale-safe, concurrent and transactional (45.667755ms)
+{"timestamp":"2026-11-03T21:01:57.803Z","severity_text":"ERROR","severity_number":17,"body":"The requested player record is unavailable.","attributes":{"error.type":"not_found","request.id":"391baff1-1b35-440d-a084-c027826ba198"}}
+✔ frozen records, reservations, immutable ordered replay and awards persist exactly once (40.574312ms)
+✔ CPU records and reward limits are server controlled; failing reservations roll back (8.493235ms)
+✔ authenticated SSE sends fresh authoritative snapshots on connect and changes (38.352204ms)
+✔ API/pool restart (and isolated PostgreSQL restart) recover records without granting twice (326.356023ms)
+{"timestamp":"2026-11-03T21:01:58.197Z","severity_text":"ERROR","severity_number":17,"body":"The request is invalid or contains unsupported fields.","attributes":{"error.type":"invalid_request","request.id":"304e0916-3950-4bf2-a42f-2deca73f1d7e"}}
+✔ deletion removes linked records and prevents silent recreation (37.123992ms)
+{"timestamp":"2026-11-03T21:01:58.325Z","severity_text":"ERROR","severity_number":17,"body":"Sign-in expired or could not be verified. Sign in again.","attributes":{"error.type":"invalid_token","request.id":"a87b25da-7fa0-45da-a2f0-a05e12a5252d"}}
+{"timestamp":"2026-11-03T21:01:58.327Z","severity_text":"ERROR","severity_number":17,"body":"Sign-in expired or could not be verified. Sign in again.","attributes":{"error.type":"invalid_token","request.id":"ac079fc9-6c7f-4a51-b049-a918394508e4"}}
+{"timestamp":"2026-11-03T21:01:58.330Z","severity_text":"ERROR","severity_number":17,"body":"Sign-in expired or could not be verified. Sign in again.","attributes":{"error.type":"invalid_token","request.id":"898bb5f3-aba9-4df0-a45c-55d396b2429d"}}
+{"timestamp":"2026-11-03T21:01:58.333Z","severity_text":"ERROR","severity_number":17,"body":"Sign-in expired or could not be verified. Sign in again.","attributes":{"error.type":"invalid_token","request.id":"5e34e4ee-c092-47ef-b308-7ad7b3f410c2"}}
+{"timestamp":"2026-11-03T21:01:58.335Z","severity_text":"ERROR","severity_number":17,"body":"Sign-in expired or could not be verified. Sign in again.","attributes":{"error.type":"invalid_token","request.id":"4a5970ca-3448-46d3-a59c-c548b053292d"}}
+{"timestamp":"2026-11-03T21:01:58.338Z","severity_text":"ERROR","severity_number":17,"body":"The token does not permit player access.","attributes":{"error.type":"scope_required","request.id":"c242c98d-90e6-4743-a139-c39f361a17d5"}}
+✔ production JWT boundary validates signature, issuer, audience, expiry and scope (120.717622ms)
+ℹ tests 8
+ℹ suites 0
+ℹ pass 8
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1455.117846

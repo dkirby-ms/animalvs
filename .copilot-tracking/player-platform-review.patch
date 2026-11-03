@@ -1,0 +1,2250 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..264f5e6
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,12 @@
++NODE_ENV=development
++DATABASE_URL=postgresql://animalvs:local-only@127.0.0.1:5432/animalvs_dev
++PORT=3000
++LOCAL_AUTH_ENABLED=true
++# Hosted API requires NODE_ENV=production and no LOCAL_AUTH_ENABLED=true.
++# ENTRA_ISSUER=https://YOUR-TENANT.ciamlogin.com/YOUR-TENANT-ID/v2.0
++# ENTRA_AUDIENCE=YOUR-API-APPLICATION-ID
++# ENTRA_JWKS_URI=https://YOUR-TENANT.ciamlogin.com/YOUR-TENANT-ID/discovery/v2.0/keys
++# ENTRA_SCOPE=access_as_user
++# VITE_ENTRA_AUTHORITY=https://YOUR-TENANT.ciamlogin.com/
++# VITE_ENTRA_CLIENT_ID=YOUR-SPA-APPLICATION-ID
++# VITE_ENTRA_SCOPE=api://YOUR-API-APPLICATION-ID/access_as_user
+diff --git a/.github/workflows/platform.yml b/.github/workflows/platform.yml
+new file mode 100644
+index 0000000..94db50c
+--- /dev/null
++++ b/.github/workflows/platform.yml
+@@ -0,0 +1,38 @@
++name: Platform checks
++on:
++  push:
++  pull_request:
++permissions:
++  contents: read
++jobs:
++  verify:
++    runs-on: ubuntu-latest
++    services:
++      postgres:
++        image: postgres:16
++        env:
++          POSTGRES_USER: animalvs
++          POSTGRES_PASSWORD: ci-local-only
++          POSTGRES_DB: animalvs_dev
++        ports:
++          - 5432:5432
++        options: >-
++          --health-cmd "pg_isready -U animalvs -d animalvs_dev"
++          --health-interval 5s
++          --health-timeout 5s
++          --health-retries 10
++    env:
++      TEST_DATABASE_URL: postgresql://animalvs:ci-local-only@127.0.0.1:5432/animalvs_dev
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-node@v4
++        with:
++          node-version: 24
++          cache: npm
++      - run: npm ci
++      - run: npm run typecheck
++      - run: npm test
++      - run: npx playwright install --with-deps chromium
++      - run: npm run test:browser
++      - run: npm run build
++      - run: npm run test:production
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..1f91cc1
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,8 @@
++node_modules/
++dist/
++.env
++.env.*
++!.env.example
++playwright-report/
++test-results/
++*.tsbuildinfo
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..7d09b28
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,74 @@
++---
++title: Animal VS
++description: Local Vue and TypeScript player platform backed by PostgreSQL.
++---
++
++## Core platform
++
++The browser displays authoritative account, roster, facility and stored battle
++state. Express owns identity and access checks; PostgreSQL owns persistence.
++Gameplay engines, matchmaking and facility mechanics are not implemented yet.
++
++## Run locally
++
++Requires Node.js 24+, npm, and PostgreSQL 16+ (or Docker Compose).
++
++```bash
++npm ci
++cp .env.example .env
++```
++
++Set a local database password in `.env`, matching `DATABASE_URL`, then start
++PostgreSQL:
++
++```bash
++POSTGRES_PASSWORD=your-local-password docker compose up -d postgres
++npm run dev:api
++```
++
++In another terminal:
++
++```bash
++npm run dev:web
++```
++
++Open the Vite URL, normally `http://127.0.0.1:5173`. Choose one of the two
++explicitly local development players. The local API applies migrations, binds
++only to loopback, and requires a loopback database whose name ends in `_dev`.
++Sign out and select the same player to recover saved progress.
++
++Without Docker, create a dedicated local PostgreSQL database ending in `_dev`
++and set `DATABASE_URL` accordingly. Do not use shared or production databases.
++
++## Verify
++
++```bash
++npm run typecheck
++npm test
++npx playwright install chromium
++npm run test:browser
++npm run build
++npm run test:production
++```
++
++Tests create an isolated PostgreSQL cluster using server tools from
++`/usr/lib/postgresql/16/bin`. Set `PG_BIN` for another installation and `PG_SHARE`
++if `initdb` requires an explicit support-files directory. The PostgreSQL client
++command `createdb` must be on `PATH`. Isolated integration tests restart the
++database to verify recovery.
++
++Alternatively, set `TEST_DATABASE_URL` to a disposable database. Integration
++tests create and remove only a random schema; browser tests run the local API
++and modify its two development players, so their database must be loopback,
++end in `_dev`, and be disposable. External-database tests verify API/pool
++restart, not database-server restart.
++
++## Production boundary
++
++`npm start` serves the built browser and API on one origin. It requires
++`NODE_ENV=production`, PostgreSQL migrations, and explicit Entra issuer,
++audience, JWKS and scope settings. No simulated identity entrypoint is built;
++the production API rejects the local flag, and built browsers cannot use it.
++
++See [platform operations and contracts](docs/platform.md) for identity setup,
++storage contracts, recovery, deletion boundaries and remaining release gates.
+diff --git a/apps/api/migrations/001-platform.sql b/apps/api/migrations/001-platform.sql
+new file mode 100644
+index 0000000..c96476e
+--- /dev/null
++++ b/apps/api/migrations/001-platform.sql
+@@ -0,0 +1,64 @@
++CREATE TABLE accounts (
++  id uuid PRIMARY KEY,
++  issuer text NOT NULL,
++  subject text NOT NULL,
++  namespace text NOT NULL CHECK (namespace IN ('local', 'entra')),
++  state jsonb NOT NULL,
++  revision integer NOT NULL DEFAULT 0 CHECK (revision >= 0),
++  UNIQUE (issuer, subject),
++  CHECK (jsonb_typeof(state) = 'object')
++);
++
++CREATE TABLE deleted_identities (
++  fingerprint text PRIMARY KEY,
++  deleted_at timestamptz NOT NULL DEFAULT now()
++);
++
++CREATE TABLE management_transactions (
++  account_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
++  transaction_id uuid NOT NULL,
++  request_hash text NOT NULL,
++  result jsonb NOT NULL,
++  created_at timestamptz NOT NULL DEFAULT now(),
++  PRIMARY KEY (account_id, transaction_id)
++);
++
++CREATE TABLE battle_reservations (
++  battle_id uuid PRIMARY KEY,
++  definition jsonb NOT NULL,
++  request_hash text NOT NULL,
++  reward_date date NOT NULL,
++  status text NOT NULL CHECK (status IN ('reserved', 'awarded'))
++);
++
++CREATE TABLE reservation_accounts (
++  battle_id uuid NOT NULL REFERENCES battle_reservations(battle_id) ON DELETE CASCADE,
++  account_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
++  PRIMARY KEY (battle_id, account_id)
++);
++
++CREATE TABLE battles (
++  id uuid PRIMARY KEY REFERENCES battle_reservations(battle_id) ON DELETE CASCADE,
++  record jsonb NOT NULL,
++  request_hash text NOT NULL
++);
++
++CREATE TABLE reward_counters (
++  account_id uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
++  reward_date date NOT NULL,
++  mode text NOT NULL CHECK (mode IN ('human', 'cpu')),
++  reserved integer NOT NULL DEFAULT 0 CHECK (reserved >= 0),
++  awarded integer NOT NULL DEFAULT 0 CHECK (awarded >= 0),
++  PRIMARY KEY (account_id, reward_date, mode)
++);
++
++CREATE TABLE pair_reward_counters (
++  first_account uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
++  second_account uuid NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
++  reward_date date NOT NULL,
++  reserved integer NOT NULL DEFAULT 0 CHECK (reserved >= 0),
++  awarded integer NOT NULL DEFAULT 0 CHECK (awarded >= 0),
++  CHECK (first_account < second_account),
++  PRIMARY KEY (first_account, second_account, reward_date)
++);
++CREATE INDEX account_battle_lookup ON reservation_accounts(account_id, battle_id);
+diff --git a/apps/api/package.json b/apps/api/package.json
+new file mode 100644
+index 0000000..1ae8401
+--- /dev/null
++++ b/apps/api/package.json
+@@ -0,0 +1,6 @@
++{
++  "name": "@animalvs/api",
++  "version": "0.1.0",
++  "private": true,
++  "type": "module"
++}
+diff --git a/apps/api/src/app.ts b/apps/api/src/app.ts
+new file mode 100644
+index 0000000..418b910
+--- /dev/null
++++ b/apps/api/src/app.ts
+@@ -0,0 +1,120 @@
++import { randomUUID } from "node:crypto";
++import express, { type ErrorRequestHandler } from "express";
++import helmet from "helmet";
++import { SpanKind, trace } from "@opentelemetry/api";
++import { z } from "zod";
++import { deletionCommandSchema, uuid } from "../../../packages/contracts/src/index.js";
++import type { Authenticate, Identity } from "./auth.js";
++import { PlatformError } from "./errors.js";
++import type { PlayerStore } from "./store.js";
++
++declare global {
++  namespace Express {
++    interface Locals { identity: Identity; accountId: string }
++  }
++}
++
++/** Build the account-scoped HTTP boundary. No route accepts authoritative gameplay records. */
++export function createApp(store: PlayerStore, authenticate: Authenticate, options: {
++  authMode: "local" | "entra"; staticDirectory?: string; streamIntervalMs?: number; identityOrigin?: string;
++}) {
++  const app = express();
++  app.disable("x-powered-by");
++  app.use((request, response, next) => {
++    trace.getTracer("animalvs-platform").startActiveSpan(request.method, {
++      kind: SpanKind.SERVER, attributes: { "http.request.method": request.method },
++    }, span => {
++      response.once("close", () => {
++        const route: unknown = request.route?.path;
++        if (typeof route === "string") {
++          span.updateName(`${request.method} ${route}`);
++          span.setAttribute("http.route", route);
++        }
++        span.setAttribute("http.response.status_code", response.statusCode);
++        span.end();
++      });
++      next();
++    });
++  });
++  const identityOrigins = options.identityOrigin ? [options.identityOrigin] : [];
++  app.use(helmet({ contentSecurityPolicy: { directives: {
++    connectSrc: ["'self'", ...identityOrigins], frameSrc: ["'self'", ...identityOrigins],
++  } } }));
++  app.use(express.json({ limit: "16kb", strict: true }));
++  app.get("/api/config", (_request, response) => response.json({ authMode: options.authMode }));
++  app.use("/api", (_request, response, next) => {
++    response.set("Cache-Control", "no-store");
++    next();
++  });
++  app.use("/api", async (request, response, next) => {
++    try {
++      if (Object.keys(request.query).length) throw new PlatformError(400, "invalid_query", "This endpoint does not accept query parameters.");
++      const identity = await authenticate(request);
++      const accountId = await store.accountFor(identity);
++      response.locals.identity = identity;
++      response.locals.accountId = accountId;
++      next();
++    } catch (error) { next(error); }
++  });
++  app.get("/api/snapshot", async (_request, response) => {
++    response.json(await store.snapshot(response.locals.accountId));
++  });
++  app.get("/api/battles/:id", async (request, response) => {
++    response.json(await store.battle(response.locals.accountId, uuid.parse(request.params.id)));
++  });
++  app.patch("/api/profile", async (request, response) => {
++    response.json(await store.profile(response.locals.accountId, request.body));
++  });
++  app.delete("/api/account", async (request, response) => {
++    deletionCommandSchema.parse(request.body);
++    await store.deleteAccount(response.locals.identity, response.locals.accountId);
++    response.status(204).end();
++  });
++  app.get("/api/events", async (request, response, next) => {
++    let active = true;
++    response.on("close", () => { active = false; });
++    try {
++      let snapshot = await store.snapshot(response.locals.accountId);
++      response.status(200).set({
++        "Content-Type": "text/event-stream", "Connection": "keep-alive", "X-Accel-Buffering": "no",
++      });
++      response.flushHeaders();
++      response.write(`event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`);
++      let revision = snapshot.account.revision;
++      while (active) {
++        await new Promise(resolve => setTimeout(resolve, options.streamIntervalMs ?? 1000));
++        if (!active) break;
++        // Revalidate access so an expired/revoked credential cannot keep a stream alive indefinitely.
++        await authenticate(request);
++        snapshot = await store.snapshot(response.locals.accountId);
++        if (snapshot.account.revision !== revision) {
++          revision = snapshot.account.revision;
++          if (!response.write(`event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`)) break;
++        } else if (!response.write(": heartbeat\n\n")) break;
++      }
++      response.end();
++    } catch (error) {
++      if (response.headersSent) {
++        console.error("Player stream failed.");
++        if (active) response.end(`event: unavailable\ndata: {"message":"Connection lost. Reload authoritative progress."}\n\n`);
++      } else next(error);
++    }
++  });
++  app.use("/api", (_request, _response, next) => next(new PlatformError(404, "not_found", "API operation is unavailable.")));
++  if (options.staticDirectory) app.use(express.static(options.staticDirectory));
++  const errorHandler: ErrorRequestHandler = (error: unknown, _request, response, _next) => {
++    const requestId = randomUUID();
++    const status = error instanceof PlatformError ? error.status : error instanceof z.ZodError ? 400 :
++      error instanceof SyntaxError ? 400 : 503;
++    const code = error instanceof PlatformError ? error.code : status === 400 ? "invalid_request" : "service_unavailable";
++    const message = error instanceof PlatformError ? error.message : status === 400 ?
++      "The request is invalid or contains unsupported fields." : "Authoritative progress is unavailable. Try again.";
++    console.error(JSON.stringify({
++      timestamp: new Date().toISOString(), severity_text: "ERROR", severity_number: 17,
++      body: message, attributes: { "error.type": code, "request.id": requestId },
++    }));
++    response.status(status).json({ error: { code, message, requestId } });
++  };
++  app.use(errorHandler);
++  return app;
++}
+diff --git a/apps/api/src/auth.ts b/apps/api/src/auth.ts
+new file mode 100644
+index 0000000..4521bd2
+--- /dev/null
++++ b/apps/api/src/auth.ts
+@@ -0,0 +1,42 @@
++import { createRemoteJWKSet, jwtVerify } from "jose";
++import type { Request } from "express";
++import { PlatformError } from "./errors.js";
++
++/** Issuer and subject, not display name or email, form the stable authenticated identity. */
++export interface Identity { issuer: string; subject: string }
++/** Resolve a verified identity or reject; never trust a body, query or account-ID header. */
++export type Authenticate = (request: Request) => Promise<Identity>;
++
++/** Validate signed access tokens against pinned issuer/audience/scope and an explicit JWKS source. */
++export function entraAuthenticator(config: {
++  issuer: string; audience: string; jwksUri: string; scope: string;
++}): Authenticate {
++  const keys = createRemoteJWKSet(new URL(config.jwksUri), { timeoutDuration: 5000 });
++  return async request => {
++    const header = request.header("authorization");
++    if (!header?.startsWith("Bearer ")) throw new PlatformError(401, "sign_in_required", "Sign in to load your progress.");
++    try {
++      const { payload } = await jwtVerify(header.slice(7), keys, {
++        issuer: config.issuer, audience: config.audience, algorithms: ["RS256"],
++        requiredClaims: ["sub", "exp", "iat"], clockTolerance: 5,
++      });
++      if (typeof payload.sub !== "string" || !payload.sub ||
++          typeof payload.scp !== "string" || !payload.scp.split(" ").includes(config.scope)) {
++        throw new PlatformError(403, "scope_required", "The token does not permit player access.");
++      }
++      return { issuer: config.issuer, subject: payload.sub };
++    } catch (error) {
++      if (error instanceof PlatformError) throw error;
++      if (error instanceof Error && ("code" in error) &&
++          typeof error.code === "string" && error.code.startsWith("ERR_JW")) {
++        throw new PlatformError(401, "invalid_token", "Sign-in expired or could not be verified. Sign in again.");
++      }
++      // JWKS outages are unavailable authentication, not valid local identities.
++      if (error instanceof Error && "code" in error && typeof error.code === "string" &&
++          error.code.startsWith("ERR_JOSE")) {
++        throw new PlatformError(401, "invalid_token", "Sign-in could not be verified.");
++      }
++      throw new PlatformError(503, "identity_unavailable", "Identity verification is unavailable. Try again.");
++    }
++  };
++}
+diff --git a/apps/api/src/config.ts b/apps/api/src/config.ts
+new file mode 100644
+index 0000000..09df30c
+--- /dev/null
++++ b/apps/api/src/config.ts
+@@ -0,0 +1,39 @@
++import { z } from "zod";
++
++const productionSchema = z.object({
++  NODE_ENV: z.literal("production"),
++  LOCAL_AUTH_ENABLED: z.string().optional().refine(value => value !== "true", "Local identity is forbidden."),
++  DATABASE_URL: z.url(),
++  ENTRA_ISSUER: z.url().startsWith("https://"),
++  ENTRA_AUDIENCE: z.string().min(1),
++  ENTRA_JWKS_URI: z.url().startsWith("https://"),
++  ENTRA_SCOPE: z.string().min(1),
++  PORT: z.coerce.number().int().min(1).max(65535).default(3000),
++});
++
++/** Fail-closed hosted configuration. Development entrypoints never enter the hosted build. */
++export function productionConfig(env: NodeJS.ProcessEnv) {
++  const config = productionSchema.parse(env);
++  if (new URL(config.DATABASE_URL).pathname.endsWith("_dev")) {
++    throw new Error("Hosted API cannot use a local development database.");
++  }
++  const issuer = new URL(config.ENTRA_ISSUER);
++  const keys = new URL(config.ENTRA_JWKS_URI);
++  if (keys.origin !== issuer.origin) throw new Error("JWKS and issuer must have the same trusted origin.");
++  return config;
++}
++
++/** Local simulation requires explicit opt-in, a loopback database and a dedicated _dev database name. */
++export function localConfig(env: NodeJS.ProcessEnv) {
++  if (env.NODE_ENV !== "development" || env.LOCAL_AUTH_ENABLED !== "true") {
++    throw new Error("Local identity requires NODE_ENV=development and LOCAL_AUTH_ENABLED=true.");
++  }
++  const databaseUrl = z.url().parse(env.DATABASE_URL);
++  const database = new URL(databaseUrl);
++  if (!["127.0.0.1", "localhost", "[::1]"].includes(database.hostname) ||
++      !database.pathname.endsWith("_dev") || database.search !== "") {
++    throw new Error("Local identity requires a loopback PostgreSQL database ending in _dev.");
++  }
++  const port = z.coerce.number().int().min(1).max(65535).default(3000).parse(env.PORT);
++  return { databaseUrl, port };
++}
+diff --git a/apps/api/src/database.ts b/apps/api/src/database.ts
+new file mode 100644
+index 0000000..0cee37c
+--- /dev/null
++++ b/apps/api/src/database.ts
+@@ -0,0 +1,48 @@
++import { readFile } from "node:fs/promises";
++import { resolve } from "node:path";
++import { Pool, type PoolClient } from "pg";
++import { SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
++
++/** Create a bounded pool; callers own pool.end(). Never log the connection URL. */
++export function databasePool(connectionString: string) {
++  const pool = new Pool({ connectionString, max: 10, connectionTimeoutMillis: 5000, idleTimeoutMillis: 10000 });
++  pool.on("error", () => console.error("PostgreSQL connection failed."));
++  return pool;
++}
++
++/** Commit all work or roll back; a failed write never returns a success-shaped result. */
++export async function transaction<T>(pool: Pool, action: (client: PoolClient) => Promise<T>): Promise<T> {
++  return trace.getTracer("animalvs-platform").startActiveSpan("TRANSACTION", {
++    kind: SpanKind.CLIENT, attributes: { "db.system.name": "postgresql", "db.operation.name": "TRANSACTION" },
++  }, async span => {
++    let client: PoolClient | undefined;
++    try {
++      client = await pool.connect();
++      await client.query("BEGIN");
++      const result = await action(client);
++      await client.query("COMMIT");
++      return result;
++    } catch (error) {
++      span.setStatus({ code: SpanStatusCode.ERROR });
++      if (client) await client.query("ROLLBACK");
++      throw error;
++    } finally {
++      client?.release();
++      span.end();
++    }
++  });
++}
++
++/** Apply versioned SQL atomically under a transaction-scoped migration lock. Run from repository root. */
++export async function migrate(pool: Pool): Promise<void> {
++  const sql = await readFile(resolve("apps/api/migrations/001-platform.sql"), "utf8");
++  await transaction(pool, async client => {
++    await client.query("SELECT pg_advisory_xact_lock(1095652435)");
++    await client.query("CREATE TABLE IF NOT EXISTS schema_migrations (version integer PRIMARY KEY)");
++    const applied = await client.query("SELECT version FROM schema_migrations WHERE version=1");
++    if (!applied.rowCount) {
++      await client.query(sql);
++      await client.query("INSERT INTO schema_migrations(version) VALUES (1)");
++    }
++  });
++}
+diff --git a/apps/api/src/dev.ts b/apps/api/src/dev.ts
+new file mode 100644
+index 0000000..296471a
+--- /dev/null
++++ b/apps/api/src/dev.ts
+@@ -0,0 +1,23 @@
++import { localConfig } from "./config.js";
++import { databasePool, migrate } from "./database.js";
++import { PlayerStore } from "./store.js";
++import { createApp } from "./app.js";
++import { PlatformError } from "./errors.js";
++
++const config = localConfig(process.env);
++const pool = databasePool(config.databaseUrl);
++await migrate(pool);
++const app = createApp(new PlayerStore(pool, "local"), async request => {
++  const credential = request.header("authorization");
++  if (credential !== "Bearer local-player-one" && credential !== "Bearer local-player-two") {
++    throw new PlatformError(401, "local_sign_in_required", "Choose a local development player.");
++  }
++  return { issuer: "urn:animalvs:local", subject: credential.slice(7) };
++}, { authMode: "local" });
++const server = app.listen(config.port, "127.0.0.1", () => console.log(`Local-only player API listening on 127.0.0.1:${config.port}.`));
++for (const signal of ["SIGINT", "SIGTERM"] as const) {
++  process.once(signal, () => {
++    server.close(() => { void pool.end(); });
++    server.closeAllConnections();
++  });
++}
+diff --git a/apps/api/src/errors.ts b/apps/api/src/errors.ts
+new file mode 100644
+index 0000000..5251256
+--- /dev/null
++++ b/apps/api/src/errors.ts
+@@ -0,0 +1,6 @@
++/** Expected API failure; messages must be safe to display without leaking private data. */
++export class PlatformError extends Error {
++  constructor(public readonly status: number, public readonly code: string, message: string) {
++    super(message);
++  }
++}
+diff --git a/apps/api/src/main.ts b/apps/api/src/main.ts
+new file mode 100644
+index 0000000..77e46d2
+--- /dev/null
++++ b/apps/api/src/main.ts
+@@ -0,0 +1,21 @@
++import { resolve } from "node:path";
++import { productionConfig } from "./config.js";
++import { entraAuthenticator } from "./auth.js";
++import { databasePool } from "./database.js";
++import { PlayerStore } from "./store.js";
++import { createApp } from "./app.js";
++
++const config = productionConfig(process.env);
++const pool = databasePool(config.DATABASE_URL);
++await pool.query("SELECT version FROM schema_migrations WHERE version=1");
++const app = createApp(new PlayerStore(pool, "entra"), entraAuthenticator({
++  issuer: config.ENTRA_ISSUER, audience: config.ENTRA_AUDIENCE,
++  jwksUri: config.ENTRA_JWKS_URI, scope: config.ENTRA_SCOPE,
++}), { authMode: "entra", staticDirectory: resolve("apps/web/dist"), identityOrigin: new URL(config.ENTRA_ISSUER).origin });
++const server = app.listen(config.PORT, () => console.log(`Player API listening on port ${config.PORT}.`));
++for (const signal of ["SIGINT", "SIGTERM"] as const) {
++  process.once(signal, () => {
++    server.close(() => { void pool.end(); });
++    server.closeAllConnections();
++  });
++}
+diff --git a/apps/api/src/migrate.ts b/apps/api/src/migrate.ts
+new file mode 100644
+index 0000000..8f63b4d
+--- /dev/null
++++ b/apps/api/src/migrate.ts
+@@ -0,0 +1,10 @@
++import { databasePool, migrate } from "./database.js";
++
++if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL is required.");
++const pool = databasePool(process.env.DATABASE_URL);
++try {
++  await migrate(pool);
++  console.log("Database migrations applied.");
++} finally {
++  await pool.end();
++}
+diff --git a/apps/api/src/store.ts b/apps/api/src/store.ts
+new file mode 100644
+index 0000000..534469f
+--- /dev/null
++++ b/apps/api/src/store.ts
+@@ -0,0 +1,264 @@
++import { createHash, randomUUID } from "node:crypto";
++import type { Pool, PoolClient } from "pg";
++import { z } from "zod";
++import {
++  accountSchema, animalIds, battleDefinitionSchema, battleSchema, profileCommandSchema,
++  snapshotSchema, uuid, type Battle, type PlayerAccount, type Snapshot,
++} from "../../../packages/contracts/src/index.js";
++import type { Identity } from "./auth.js";
++import { transaction } from "./database.js";
++import { PlatformError } from "./errors.js";
++
++type AccountRow = { id: string; state: unknown; revision: number };
++type Definition = z.infer<typeof battleDefinitionSchema>;
++const notFound = () => new PlatformError(404, "not_found", "The requested player record is unavailable.");
++const conflict = () => new PlatformError(409, "stale_action", "Progress changed. Reload before trying again.");
++const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
++const fingerprint = (identity: Identity) => hash([identity.issuer, identity.subject]);
++const dateSchema = z.iso.date();
++const limitsSchema = z.strictObject({ account: z.number().int().positive(), pair: z.number().int().positive() });
++
++function decode(row: AccountRow): PlayerAccount {
++  return accountSchema.parse({ ...z.record(z.string(), z.unknown()).parse(row.state), id: row.id, revision: row.revision });
++}
++
++async function loadLocked(client: PoolClient, id: string): Promise<PlayerAccount> {
++  const result = await client.query<AccountRow>("SELECT id,state,revision FROM accounts WHERE id=$1 FOR UPDATE", [id]);
++  const row = result.rows[0];
++  if (!row) throw notFound();
++  return decode(row);
++}
++
++async function writeAccount(client: PoolClient, state: PlayerAccount) {
++  const next = accountSchema.parse({ ...state, revision: state.revision + 1 });
++  const { id, revision, ...body } = next;
++  await client.query("UPDATE accounts SET state=$2,revision=$3 WHERE id=$1", [id, body, revision]);
++  return next;
++}
++
++function participants(definition: Definition) {
++  const ids = definition.choices.flatMap(choice => choice.accountId ? [choice.accountId] : []).sort();
++  if (ids.length !== (definition.mode === "human" ? 2 : 1) || new Set(ids).size !== ids.length ||
++      (definition.mode === "cpu" ? !definition.cpuProfileId || definition.choices[1].accountId !== null
++        : definition.cpuProfileId !== null) || !definition.choices[0].accountId) {
++    throw new PlatformError(422, "invalid_battle", "Invalid human participants or CPU profile.");
++  }
++  return ids;
++}
++
++/** PostgreSQL authority boundary. Only profile intent is public; gameplay mutations are trusted server calls. */
++export class PlayerStore {
++  constructor(private readonly pool: Pool, private readonly namespace: "local" | "entra") {}
++
++  /** Resolve or create a stable identity; a deleted identity cannot recreate progress implicitly. */
++  async accountFor(identity: Identity): Promise<string> {
++    return transaction(this.pool, async client => {
++      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [fingerprint(identity)]);
++      const deleted = await client.query("SELECT 1 FROM deleted_identities WHERE fingerprint=$1", [fingerprint(identity)]);
++      if (deleted.rowCount) throw new PlatformError(410, "account_deleted", "Application data was deleted. Contact support before creating another account.");
++      const existing = await client.query<{ id: string; namespace: string }>(
++        "SELECT id,namespace FROM accounts WHERE issuer=$1 AND subject=$2", [identity.issuer, identity.subject]);
++      if (existing.rows[0]) {
++        if (existing.rows[0].namespace !== this.namespace) throw new PlatformError(403, "identity_boundary", "Identity environment mismatch.");
++        return existing.rows[0].id;
++      }
++      const id = randomUUID();
++      const state = {
++        displayName: "Player", economy: { credits: 0, turns: 24, lastResetDate: new Date().toISOString().slice(0, 10) },
++        animals: animalIds.map(animalId => ({ animalId, level: 1, residualXp: 0, welfare: 0, lastTrainingDate: null })),
++        facilities: [], pendingPurchases: [],
++      };
++      accountSchema.parse({ ...state, id, revision: 0 });
++      await client.query("INSERT INTO accounts(id,issuer,subject,namespace,state) VALUES($1,$2,$3,$4,$5)",
++        [id, identity.issuer, identity.subject, this.namespace, state]);
++      return id;
++    });
++  }
++
++  /** Read a consistent authoritative snapshot. Recovery never invokes a game engine or grants rewards. */
++  async snapshot(accountId: string): Promise<Snapshot> {
++    return transaction(this.pool, async client => {
++      await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
++      const result = await client.query<AccountRow>("SELECT id,state,revision FROM accounts WHERE id=$1", [accountId]);
++      const row = result.rows[0];
++      if (!row) throw notFound();
++      const completed = await client.query<{ record: unknown }>(
++        `SELECT b.record FROM battles b JOIN reservation_accounts p ON p.battle_id=b.id
++         WHERE p.account_id=$1 ORDER BY b.record->>'completedAt' DESC LIMIT 50`, [accountId]);
++      const pending = await client.query<{ definition: unknown }>(
++        `SELECT r.definition FROM battle_reservations r JOIN reservation_accounts p USING(battle_id)
++         WHERE p.account_id=$1 AND r.status='reserved' ORDER BY r.battle_id`, [accountId]);
++      return snapshotSchema.parse({
++        account: decode(row), battles: completed.rows.map(item => item.record),
++        pendingBattles: pending.rows.map(item => item.definition), serverTime: new Date().toISOString(),
++      });
++    });
++  }
++
++  /** Deny private battle reads to nonparticipants without revealing whether the battle exists. */
++  async battle(accountId: string, battleId: string): Promise<Battle> {
++    uuid.parse(battleId);
++    const result = await this.pool.query<{ record: unknown }>(
++      `SELECT b.record FROM battles b JOIN reservation_accounts p ON p.battle_id=b.id
++       WHERE b.id=$1 AND p.account_id=$2`, [battleId, accountId]);
++    if (!result.rows[0]) throw notFound();
++    return battleSchema.parse(result.rows[0].record);
++  }
++
++  /** Persist an intent exactly once; conflicting reuse and stale revisions fail explicitly. */
++  async profile(accountId: string, input: unknown): Promise<PlayerAccount> {
++    const command = profileCommandSchema.parse(input);
++    return this.management(accountId, command.transactionId, command.expectedRevision, command,
++      account => ({ ...account, displayName: command.displayName }));
++  }
++
++  /**
++   * Trusted gameplay transaction. The callback runs under the account lock and must have no external effects.
++   * Idempotent retries return the stored result; changed requests with the same ID are rejected.
++   */
++  async management(accountId: string, transactionId: string, expectedRevision: number, intent: unknown,
++    apply: (account: PlayerAccount) => PlayerAccount): Promise<PlayerAccount> {
++    uuid.parse(transactionId);
++    return transaction(this.pool, async client => {
++      const account = await loadLocked(client, accountId);
++      const prior = await client.query<{ request_hash: string; result: unknown }>(
++        "SELECT request_hash,result FROM management_transactions WHERE account_id=$1 AND transaction_id=$2",
++        [accountId, transactionId]);
++      const digest = hash(intent);
++      if (prior.rows[0]) {
++        if (prior.rows[0].request_hash !== digest) throw new PlatformError(409, "idempotency_conflict", "Transaction ID was already used for a different action.");
++        return accountSchema.parse(prior.rows[0].result);
++      }
++      if (account.revision !== expectedRevision) throw conflict();
++      const changed = accountSchema.parse(apply(structuredClone(account)));
++      if (changed.id !== account.id || changed.revision !== account.revision) throw conflict();
++      const next = await writeAccount(client, changed);
++      await client.query(
++        "INSERT INTO management_transactions(account_id,transaction_id,request_hash,result) VALUES($1,$2,$3,$4)",
++        [accountId, transactionId, digest, next]);
++      return next;
++    });
++  }
++
++  /**
++   * Persist frozen battle inputs and reserve daily reward capacity before simulation.
++   * Limits and date are server rules inputs. Locks are taken in stable account-ID order.
++   */
++  async reserveBattle(input: unknown, rewardDate: string, limits: z.infer<typeof limitsSchema>): Promise<void> {
++    const definition = battleDefinitionSchema.parse(input);
++    const ids = participants(definition);
++    dateSchema.parse(rewardDate);
++    limitsSchema.parse(limits);
++    await transaction(this.pool, async client => {
++      for (const id of ids) await loadLocked(client, id);
++      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [definition.id]);
++      const prior = await client.query<{ request_hash: string }>("SELECT request_hash FROM battle_reservations WHERE battle_id=$1", [definition.id]);
++      const digest = hash([definition, rewardDate]);
++      if (prior.rows[0]) {
++        if (prior.rows[0].request_hash !== digest) throw conflict();
++        return;
++      }
++      for (const id of ids) {
++        const counter = await client.query(
++          `INSERT INTO reward_counters(account_id,reward_date,mode,reserved) VALUES($1,$2,$3,1)
++           ON CONFLICT(account_id,reward_date,mode) DO UPDATE SET reserved=reward_counters.reserved+1
++           WHERE reward_counters.reserved+reward_counters.awarded < $4 RETURNING account_id`,
++          [id, rewardDate, definition.mode, limits.account]);
++        if (!counter.rowCount) throw new PlatformError(409, "reward_limit", "Daily reward capacity is exhausted.");
++      }
++      if (ids.length === 2) {
++        const counter = await client.query(
++          `INSERT INTO pair_reward_counters(first_account,second_account,reward_date,reserved) VALUES($1,$2,$3,1)
++           ON CONFLICT(first_account,second_account,reward_date) DO UPDATE SET reserved=pair_reward_counters.reserved+1
++           WHERE pair_reward_counters.reserved+pair_reward_counters.awarded < $4 RETURNING first_account`,
++          [ids[0], ids[1], rewardDate, limits.pair]);
++        if (!counter.rowCount) throw new PlatformError(409, "pair_reward_limit", "Pair reward capacity is exhausted.");
++      }
++      await client.query("INSERT INTO battle_reservations VALUES($1,$2,$3,$4,'reserved')",
++        [definition.id, definition, digest, rewardDate]);
++      for (const id of ids) {
++        await client.query("INSERT INTO reservation_accounts VALUES($1,$2)", [definition.id, id]);
++        await writeAccount(client, await loadLocked(client, id));
++      }
++    });
++  }
++
++  /**
++   * Atomically store a server-resolved replay and apply XP to the latest locked animal state.
++   * Retries cannot grant twice. The pure callback owns game formulas and runs only on first commit.
++   */
++  async completeBattle(input: unknown, applyAward: (
++    account: PlayerAccount, award: Battle["awards"][number],
++  ) => PlayerAccount["animals"][number]): Promise<void> {
++    const battle = battleSchema.parse(input);
++    const ids = participants(battle);
++    await transaction(this.pool, async client => {
++      const accounts = new Map<string, PlayerAccount>();
++      for (const id of ids) accounts.set(id, await loadLocked(client, id));
++      const reserved = await client.query<{ definition: unknown; reward_date: string }>(
++        "SELECT definition,reward_date::text FROM battle_reservations WHERE battle_id=$1 FOR UPDATE", [battle.id]);
++      if (!reserved.rows[0]) throw new PlatformError(409, "reservation_required", "Battle must be stored before completion.");
++      const definition = battleDefinitionSchema.parse(
++        Object.fromEntries(Object.keys(battleDefinitionSchema.shape).map(key => [key, Reflect.get(battle, key)])));
++      if (hash(definition) !== hash(battleDefinitionSchema.parse(reserved.rows[0].definition))) throw conflict();
++      const digest = hash(battle);
++      const prior = await client.query<{ request_hash: string }>("SELECT request_hash FROM battles WHERE id=$1", [battle.id]);
++      if (prior.rows[0]) {
++        if (prior.rows[0].request_hash !== digest) throw conflict();
++        return;
++      }
++      for (const award of battle.awards) {
++        const account = accounts.get(award.accountId);
++        if (!account) throw conflict();
++        const animal = applyAward(structuredClone(account), award);
++        if (animal.animalId !== award.animalId) throw conflict();
++        account.animals = account.animals.map(current => current.animalId === animal.animalId ? animal : current);
++        account.economy.credits += award.credits;
++      }
++      for (const account of accounts.values()) await writeAccount(client, account);
++      await client.query("INSERT INTO battles VALUES($1,$2,$3)", [battle.id, battle, digest]);
++      await client.query("UPDATE battle_reservations SET status='awarded' WHERE battle_id=$1", [battle.id]);
++      await client.query(
++        `UPDATE reward_counters SET reserved=reserved-1,awarded=awarded+1
++         WHERE account_id=ANY($1::uuid[]) AND reward_date=$2 AND mode=$3`, [ids, reserved.rows[0].reward_date, battle.mode]);
++      if (ids.length === 2) await client.query(
++        `UPDATE pair_reward_counters SET reserved=reserved-1,awarded=awarded+1
++         WHERE first_account=$1 AND second_account=$2 AND reward_date=$3`,
++        [ids[0], ids[1], reserved.rows[0].reward_date]);
++    });
++  }
++
++  /** Immediately erase application records after authenticated confirmation; tombstone prevents implicit recreation. */
++  async deleteAccount(identity: Identity, accountId: string): Promise<void> {
++    await transaction(this.pool, async client => {
++      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [fingerprint(identity)]);
++      const related = await client.query<{ account_id: string }>(
++        `SELECT DISTINCT p.account_id FROM reservation_accounts p
++         WHERE p.battle_id IN (SELECT battle_id FROM reservation_accounts WHERE account_id=$1)
++         UNION SELECT id FROM accounts WHERE id=$1 ORDER BY account_id`, [accountId]);
++      for (const row of related.rows) await loadLocked(client, row.account_id);
++      const owned = await client.query("SELECT id FROM accounts WHERE id=$1 AND issuer=$2 AND subject=$3",
++        [accountId, identity.issuer, identity.subject]);
++      if (!owned.rowCount) throw notFound();
++      await client.query(
++        `UPDATE reward_counters c SET reserved=c.reserved-released.count
++         FROM (
++           SELECT p.account_id,r.reward_date,r.definition->>'mode' AS mode,count(*)::int AS count
++           FROM battle_reservations r JOIN reservation_accounts p USING(battle_id)
++           WHERE r.status='reserved' AND r.battle_id IN
++             (SELECT battle_id FROM reservation_accounts WHERE account_id=$1)
++           GROUP BY p.account_id,r.reward_date,r.definition->>'mode'
++         ) released
++         WHERE c.account_id=released.account_id AND c.reward_date=released.reward_date AND c.mode=released.mode`, [accountId]);
++      // Remove shared replay records too: they contain both participants' frozen data.
++      await client.query(
++        `DELETE FROM battle_reservations WHERE battle_id IN
++         (SELECT battle_id FROM reservation_accounts WHERE account_id=$1)`, [accountId]);
++      for (const row of related.rows) if (row.account_id !== accountId) {
++        await writeAccount(client, await loadLocked(client, row.account_id));
++      }
++      await client.query("DELETE FROM accounts WHERE id=$1", [accountId]);
++      await client.query("INSERT INTO deleted_identities(fingerprint) VALUES($1)", [fingerprint(identity)]);
++    });
++  }
++}
+diff --git a/apps/api/tsconfig.build.json b/apps/api/tsconfig.build.json
+new file mode 100644
+index 0000000..aad6235
+--- /dev/null
++++ b/apps/api/tsconfig.build.json
+@@ -0,0 +1,6 @@
++{
++  "extends": "../../tsconfig.json",
++  "compilerOptions": { "outDir": "../../dist", "rootDir": "../.." },
++  "include": ["src/main.ts", "src/migrate.ts"],
++  "exclude": ["src/dev.ts", "node_modules"]
++}
+diff --git a/apps/web/index.html b/apps/web/index.html
+new file mode 100644
+index 0000000..22c624b
+--- /dev/null
++++ b/apps/web/index.html
+@@ -0,0 +1,13 @@
++<!doctype html>
++<html lang="en">
++  <head>
++    <meta charset="UTF-8">
++    <meta name="viewport" content="width=device-width, initial-scale=1.0">
++    <meta name="color-scheme" content="dark">
++    <title>Animal VS | Player platform</title>
++  </head>
++  <body>
++    <div id="app"></div>
++    <script type="module" src="/src/main.ts"></script>
++  </body>
++</html>
+diff --git a/apps/web/package.json b/apps/web/package.json
+new file mode 100644
+index 0000000..d46e233
+--- /dev/null
++++ b/apps/web/package.json
+@@ -0,0 +1,16 @@
++{
++  "name": "@animalvs/web",
++  "version": "0.1.0",
++  "private": true,
++  "type": "module",
++  "scripts": { "dev": "vite --host 127.0.0.1", "build": "vite build" },
++  "dependencies": {
++    "@azure/msal-browser": "^4.25.0",
++    "vue": "^3.5.0"
++  },
++  "devDependencies": {
++    "@vitejs/plugin-vue": "^6.0.0",
++    "vite": "^7.1.0",
++    "vue-tsc": "^3.1.0"
++  }
++}
+diff --git a/apps/web/src/App.vue b/apps/web/src/App.vue
+new file mode 100644
+index 0000000..d4ca132
+--- /dev/null
++++ b/apps/web/src/App.vue
+@@ -0,0 +1,149 @@
++<script setup lang="ts">
++import { onMounted, ref, watch } from "vue";
++import { usePlayer } from "./usePlayer.js";
++
++const player = usePlayer();
++const { snapshot, error, status, connected, busy, local, ready, signedIn } = player;
++const displayName = ref("");
++const confirmation = ref("");
++const animals = {
++  tiger: "Bengal tiger", lion: "African lion", bear: "Brown bear",
++  hippo: "Hippopotamus", rhino: "White rhinoceros", crocodile: "Nile crocodile",
++};
++watch(() => snapshot.value?.account.displayName, name => { displayName.value = name ?? ""; });
++onMounted(() => { void player.initialize(); });
++</script>
++
++<template>
++  <main>
++    <header>
++      <div>
++        <p class="eyebrow">Animal VS / Core platform</p>
++        <h1>Your contenders.<br>Your progress.</h1>
++        <p class="intro">A persistent home for your roster. Battles and facility actions are coming next.</p>
++      </div>
++      <div class="session">
++        <p role="status">{{ status }}</p>
++        <button v-if="signedIn" @click="player.signOut">Sign out</button>
++      </div>
++    </header>
++
++    <div v-if="error" role="alert" class="error">{{ error }}</div>
++
++    <section v-if="!signedIn" class="panel">
++      <h2>Welcome to your roster</h2>
++      <p>Sign in to load saved progress. No guest progress or browser saves are used.</p>
++      <template v-if="local">
++        <p class="notice">Local development only. These identities are not valid in production.</p>
++        <div class="actions">
++          <button :disabled="!ready" @click="player.start('one')">Use local player one</button>
++          <button :disabled="!ready" @click="player.start('two')">Use local player two</button>
++        </div>
++      </template>
++      <button v-else :disabled="!ready" @click="player.signIn">Sign in with Microsoft</button>
++    </section>
++
++    <template v-if="snapshot">
++      <section class="summary" aria-label="Account overview">
++        <div class="panel"><h2>{{ snapshot.account.displayName }}</h2><p>Server revision {{ snapshot.account.revision }}</p></div>
++        <div class="panel"><h2>{{ snapshot.account.economy.credits }} credits</h2><p>{{ snapshot.account.economy.turns }} management turns</p></div>
++        <div class="panel"><h2>UTC reset</h2><p>Last processed: {{ snapshot.account.economy.lastResetDate }}</p></div>
++      </section>
++
++      <section aria-labelledby="roster-title">
++        <div class="section-title"><h2 id="roster-title">Your collection</h2><span>Six starter contenders</span></div>
++        <ul class="roster">
++          <li v-for="animal in snapshot.account.animals" :key="animal.animalId" class="panel animal">
++            <span class="animal-mark" aria-hidden="true">{{ animal.animalId.slice(0, 2).toUpperCase() }}</span>
++            <h3>{{ animals[animal.animalId] }}</h3>
++            <p>Level {{ animal.level }} · {{ animal.residualXp }} XP</p>
++            <p>Welfare {{ animal.welfare }}/100</p>
++            <p class="muted">Last training: {{ animal.lastTrainingDate ?? 'Not trained' }}</p>
++          </li>
++        </ul>
++      </section>
++
++      <section class="summary">
++        <div class="panel">
++          <h2>Facilities</h2>
++          <p v-if="!snapshot.account.facilities.length">No facilities built yet.</p>
++          <ul><li v-for="facility in snapshot.account.facilities" :key="facility.facilityId">{{ facility.facilityId }} · Level {{ facility.level }}</li></ul>
++          <p>{{ snapshot.account.pendingPurchases.length }} pending purchases</p>
++        </div>
++        <div class="panel">
++          <h2>Battle recovery</h2>
++          <p>{{ snapshot.pendingBattles.length }} stored pending battles</p>
++          <p v-if="!snapshot.battles.length">No completed battles yet.</p>
++          <details v-for="battle in snapshot.battles" :key="battle.id">
++            <summary>{{ battle.mode === 'cpu' ? 'CPU' : 'Human' }} battle · {{ battle.outcome }}</summary>
++            <ol><li v-for="event in battle.events" :key="event.sequence">{{ event.text }}</li></ol>
++          </details>
++          <p class="muted">Recovery reads recorded results. It never simulates or awards twice.</p>
++        </div>
++      </section>
++
++      <section class="panel">
++        <h2>Account settings</h2>
++        <form @submit.prevent="player.saveName(displayName)">
++          <label for="display-name">Display name (not your real name)</label>
++          <div class="actions">
++            <input id="display-name" v-model="displayName" maxlength="40" required autocomplete="nickname">
++            <button :disabled="busy || !connected" type="submit">Save display name</button>
++          </div>
++        </form>
++        <details class="deletion">
++          <summary>Delete application data</summary>
++          <p>This permanently removes progress and account-linked battle history. Your Microsoft identity and expiring backups are managed separately.</p>
++          <label for="delete-confirmation">Type DELETE to confirm</label>
++          <div class="actions">
++            <input id="delete-confirmation" v-model="confirmation" autocomplete="off">
++            <button class="danger" :disabled="confirmation !== 'DELETE' || busy || !connected" @click="player.deleteAccount">Delete my application data</button>
++          </div>
++        </details>
++      </section>
++    </template>
++    <footer>Server-authoritative progression · Stylized, non-graphic gameplay · Platform preview</footer>
++  </main>
++</template>
++
++<style>
++:root { font-family: system-ui, sans-serif; color: #eef4ed; background: #101914; line-height: 1.6; }
++* { box-sizing: border-box; }
++body { margin: 0; }
++main { max-width: 1160px; margin: auto; padding: 48px 24px; }
++header { display: flex; justify-content: space-between; gap: 24px; padding: 16px 0 42px; }
++h1 { font-size: clamp(2.4rem, 6vw, 4.5rem); line-height: 1.08; letter-spacing: -.04em; margin: 12px 0 24px; }
++h2 { font-size: 1.25rem; margin: 0 0 12px; }
++h3 { font-size: 1.1rem; margin: 16px 0 6px; }
++p { margin: 8px 0; }
++.eyebrow { color: #b7d791; text-transform: uppercase; letter-spacing: .15em; font-weight: 700; font-size: .8rem; }
++.intro, .muted, footer, .section-title span { color: #becbbf; }
++.intro { max-width: 540px; }
++.session { min-width: 190px; text-align: right; padding-top: 16px; }
++.panel { padding: 24px; background: #1a2920; border: 1px solid #3a5140; border-radius: 12px; margin-bottom: 24px; }
++.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 20px; }
++.section-title { display: flex; gap: 20px; justify-content: space-between; margin: 16px 0; }
++.roster { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 20px; list-style: none; padding: 0; }
++.animal { margin: 0; }
++.animal-mark { display: inline-flex; align-items: center; justify-content: center; width: 52px; height: 52px; background: #304b36; color: #d3ecaf; border-radius: 9px; font-size: 1rem; font-weight: 800; letter-spacing: .1em; }
++section { margin-bottom: 24px; }
++button, input { font: inherit; border-radius: 6px; min-height: 44px; padding: 9px 16px; }
++button { cursor: pointer; border: 1px solid #c5df9e; background: #c5df9e; color: #152313; font-weight: 650; }
++button:disabled { cursor: not-allowed; opacity: .55; }
++input { background: #101914; color: #eef4ed; border: 1px solid #78917b; min-width: 0; }
++label { display: block; margin: 12px 0 8px; }
++.actions { display: flex; flex-wrap: wrap; gap: 12px; }
++.actions input { flex: 1 1 200px; }
++:focus-visible { outline: 3px solid #f8d287; outline-offset: 4px; }
++.error { border: 1px solid #f2a394; color: #ffe1d9; background: #402820; padding: 18px; border-radius: 8px; margin-bottom: 24px; }
++.notice { color: #f8d287; margin: 20px 0; }
++.deletion { margin-top: 28px; border-top: 1px solid #526454; padding-top: 20px; }
++summary { cursor: pointer; padding: 6px 0; }
++.danger { color: #ffdfd7; background: #542f25; border-color: #e5a292; }
++footer { font-size: .85rem; margin-top: 40px; }
++@media (max-width: 600px) {
++  main { padding: 24px 16px; }
++  header, .section-title { flex-direction: column; }
++  .session { text-align: left; }
++}
++</style>
+diff --git a/apps/web/src/auth.ts b/apps/web/src/auth.ts
+new file mode 100644
+index 0000000..7edde11
+--- /dev/null
++++ b/apps/web/src/auth.ts
+@@ -0,0 +1,39 @@
++import { PublicClientApplication } from "@azure/msal-browser";
++
++/** SPA identity adapter. Tokens authorize API reads; progress is never stored in browser storage. */
++export interface PlayerAuth {
++  signedIn: boolean;
++  token: () => Promise<string>;
++  signIn: () => Promise<void>;
++  signOut: () => Promise<void>;
++}
++
++/** Initialize PKCE redirect sign-in against explicit existing-tenant registrations; no guest fallback. */
++export async function initializeEntra(): Promise<PlayerAuth> {
++  const authority = import.meta.env.VITE_ENTRA_AUTHORITY;
++  const clientId = import.meta.env.VITE_ENTRA_CLIENT_ID;
++  const scope = import.meta.env.VITE_ENTRA_SCOPE;
++  if (!authority || !clientId || !scope) throw new Error("Entra sign-in is not configured. Set the SPA authority, client ID and API scope before building.");
++  const url = new URL(authority);
++  if (url.protocol !== "https:") throw new Error("Entra authority must use HTTPS.");
++  const app = new PublicClientApplication({
++    auth: { authority, clientId, knownAuthorities: [url.hostname], redirectUri: window.location.origin },
++    cache: { cacheLocation: "sessionStorage" },
++  });
++  await app.initialize();
++  const redirect = await app.handleRedirectPromise();
++  if (redirect?.account) app.setActiveAccount(redirect.account);
++  const account = app.getActiveAccount() ?? app.getAllAccounts()[0];
++  if (account) app.setActiveAccount(account);
++  return {
++    signedIn: Boolean(account),
++    async token() {
++      const current = app.getActiveAccount();
++      if (!current) throw new Error("Sign in before loading saved progress.");
++      const result = await app.acquireTokenSilent({ account: current, scopes: [scope] });
++      return result.accessToken;
++    },
++    async signIn() { await app.loginRedirect({ scopes: [scope] }); },
++    async signOut() { await app.logoutRedirect({ postLogoutRedirectUri: window.location.origin }); },
++  };
++}
+diff --git a/apps/web/src/env.d.ts b/apps/web/src/env.d.ts
+new file mode 100644
+index 0000000..a95450a
+--- /dev/null
++++ b/apps/web/src/env.d.ts
+@@ -0,0 +1,2 @@
++/** True only for Vite's serve command, never for a built browser artifact. */
++declare const __LOCAL_AUTH_BUILD__: boolean;
+diff --git a/apps/web/src/main.ts b/apps/web/src/main.ts
+new file mode 100644
+index 0000000..8d234a4
+--- /dev/null
++++ b/apps/web/src/main.ts
+@@ -0,0 +1,3 @@
++import { createApp } from "vue";
++import App from "./App.vue";
++createApp(App).mount("#app");
+diff --git a/apps/web/src/usePlayer.ts b/apps/web/src/usePlayer.ts
+new file mode 100644
+index 0000000..fe5c90a
+--- /dev/null
++++ b/apps/web/src/usePlayer.ts
+@@ -0,0 +1,189 @@
++import { onBeforeUnmount, ref, shallowRef } from "vue";
++import { z } from "zod";
++import { snapshotSchema, type Snapshot } from "../../../packages/contracts/src/index.js";
++import { initializeEntra, type PlayerAuth } from "./auth.js";
++
++const errorSchema = z.object({ error: z.object({ message: z.string() }) });
++
++/** Live player session. Sign-out aborts all reads; reconnect always requests a fresh server snapshot. */
++export function usePlayer() {
++  const snapshot = shallowRef<Snapshot | null>(null);
++  const error = ref("");
++  const status = ref("Starting platform");
++  const connected = ref(false);
++  const busy = ref(false);
++  const local = ref(false);
++  const ready = ref(false);
++  const signedIn = ref(false);
++  let auth: PlayerAuth | undefined;
++  let token: (() => Promise<string>) | undefined;
++  let controller: AbortController | undefined;
++  let generation = 0;
++  let retry: ReturnType<typeof setTimeout> | undefined;
++
++  function stop() {
++    generation++;
++    controller?.abort();
++    clearTimeout(retry);
++    controller = undefined;
++    connected.value = false;
++    busy.value = false;
++  }
++
++  function accept(next: Snapshot) {
++    if (!snapshot.value || next.account.id !== snapshot.value.account.id ||
++        next.account.revision >= snapshot.value.account.revision) snapshot.value = next;
++  }
++
++  async function fetchPrivate(path: string, init: RequestInit, signal: AbortSignal) {
++    if (!token) throw new Error("Sign in before loading progress.");
++    const credential = await token();
++    const response = await fetch(`/api/${path}`, {
++      ...init, signal, headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
++    });
++    if (!response.ok) {
++      const body: unknown = await response.json();
++      const parsed = errorSchema.safeParse(body);
++      throw new Error(parsed.success ? parsed.data.error.message : "The server returned an invalid error. Progress was not loaded.");
++    }
++    return response;
++  }
++
++  async function recover(current: number) {
++    const active = controller;
++    if (!active || current !== generation) return;
++    connected.value = false;
++    status.value = "Loading authoritative progress";
++    try {
++      const response = await fetchPrivate("snapshot", {}, active.signal);
++      const state = snapshotSchema.parse(await response.json());
++      if (current !== generation) return;
++      accept(state);
++      error.value = "";
++      status.value = "Connecting live updates";
++      const events = await fetchPrivate("events", {}, active.signal);
++      const reader = events.body?.getReader();
++      if (!reader) throw new Error("Live connection is unavailable.");
++      let buffer = "";
++      const decoder = new TextDecoder();
++      try {
++        while (current === generation) {
++          const chunk = await reader.read();
++          if (chunk.done) throw new Error("Live connection closed.");
++          buffer += decoder.decode(chunk.value, { stream: true });
++          let boundary: number;
++          while ((boundary = buffer.indexOf("\n\n")) !== -1) {
++            const event = buffer.slice(0, boundary);
++            buffer = buffer.slice(boundary + 2);
++            if (event.startsWith("event: unavailable")) throw new Error("The server cannot load progress right now.");
++            const line = event.split("\n").find(item => item.startsWith("data: "));
++            if (event.startsWith("event: snapshot") && line) {
++              const next = snapshotSchema.parse(JSON.parse(line.slice(6)));
++              if (current !== generation) return;
++              accept(next);
++              connected.value = true;
++              status.value = "Connected to server";
++              error.value = "";
++            }
++          }
++        }
++      } finally {
++        await reader.cancel();
++        reader.releaseLock();
++      }
++    } catch (failure) {
++      if (current !== generation || active.signal.aborted) return;
++      connected.value = false;
++      status.value = "Connection lost";
++      error.value = `${failure instanceof Error ? failure.message : "Progress is unavailable."} Retrying from the server; shown progress may be stale.`;
++      retry = setTimeout(() => { void recover(current); }, 2000);
++    }
++  }
++
++  async function start(localPlayer?: string) {
++    stop();
++    snapshot.value = null;
++    error.value = "";
++    controller = new AbortController();
++    if (__LOCAL_AUTH_BUILD__ && local.value && localPlayer) token = async () => `local-player-${localPlayer}`;
++    else if (auth) token = auth.token;
++    else throw new Error("Sign-in configuration is unavailable.");
++    signedIn.value = true;
++    await recover(generation);
++  }
++
++  async function initialize() {
++    try {
++      const response = await fetch("/api/config");
++      if (!response.ok) throw new Error("Platform configuration is unavailable.");
++      const config = z.object({ authMode: z.enum(["local", "entra"]) }).parse(await response.json());
++      local.value = __LOCAL_AUTH_BUILD__ && config.authMode === "local";
++      if (config.authMode === "local" && !local.value) throw new Error("A production browser cannot use local identity.");
++      if (!local.value) auth = await initializeEntra();
++      ready.value = true;
++      status.value = "Signed out";
++      if (auth?.signedIn) void start();
++    } catch (failure) {
++      error.value = failure instanceof Error ? failure.message : "Platform initialization failed.";
++      status.value = "Platform unavailable";
++    }
++  }
++
++  async function signIn() {
++    try {
++      if (!auth) throw new Error("Sign-in is unavailable.");
++      await auth.signIn();
++    } catch (failure) {
++      error.value = failure instanceof Error ? failure.message : "Sign-in failed.";
++    }
++  }
++
++  async function signOut() {
++    stop();
++    snapshot.value = null;
++    signedIn.value = false;
++    token = undefined;
++    error.value = "";
++    status.value = "Signed out";
++    if (auth) {
++      try { await auth.signOut(); }
++      catch (failure) { error.value = failure instanceof Error ? failure.message : "Identity sign-out failed."; }
++    }
++  }
++
++  async function saveName(displayName: string) {
++    const active = controller;
++    const state = snapshot.value;
++    const current = generation;
++    if (!active || !state || !connected.value) return;
++    busy.value = true;
++    try {
++      await fetchPrivate("profile", {
++        method: "PATCH", body: JSON.stringify({ transactionId: crypto.randomUUID(), expectedRevision: state.account.revision, displayName }),
++      }, active.signal);
++      const fresh = snapshotSchema.parse(await (await fetchPrivate("snapshot", {}, active.signal)).json());
++      if (current === generation) { accept(fresh); error.value = ""; }
++    } catch (failure) {
++      if (current === generation) error.value = failure instanceof Error ? failure.message : "Display name could not be saved.";
++    } finally { if (current === generation) busy.value = false; }
++  }
++
++  async function deleteAccount() {
++    const active = controller;
++    const current = generation;
++    if (!active || !connected.value) return;
++    busy.value = true;
++    try {
++      await fetchPrivate("account", { method: "DELETE", body: '{"confirmation":"DELETE"}' }, active.signal);
++      if (current === generation) {
++        await signOut();
++        status.value = "Application data deleted";
++      }
++    } catch (failure) {
++      if (current === generation) error.value = failure instanceof Error ? failure.message : "Deletion failed. Try again.";
++    } finally { busy.value = false; }
++  }
++
++  onBeforeUnmount(stop);
++  return { snapshot, error, status, connected, busy, local, ready, signedIn, initialize, start, signIn, signOut, saveName, deleteAccount };
++}
+diff --git a/apps/web/tsconfig.json b/apps/web/tsconfig.json
+new file mode 100644
+index 0000000..0b3fcde
+--- /dev/null
++++ b/apps/web/tsconfig.json
+@@ -0,0 +1,11 @@
++{
++  "extends": "../../tsconfig.json",
++  "compilerOptions": {
++    "module": "ESNext",
++    "moduleResolution": "Bundler",
++    "types": ["vite/client"],
++    "lib": ["ES2023", "DOM", "DOM.Iterable"],
++    "noEmit": true
++  },
++  "include": ["src/**/*.ts", "src/**/*.vue", "../../packages/contracts/src/**/*.ts"]
++}
+diff --git a/apps/web/vite.config.ts b/apps/web/vite.config.ts
+new file mode 100644
+index 0000000..3568fce
+--- /dev/null
++++ b/apps/web/vite.config.ts
+@@ -0,0 +1,9 @@
++import { defineConfig } from "vite";
++import vue from "@vitejs/plugin-vue";
++
++export default defineConfig(({ command }) => ({
++  plugins: [vue()],
++  envDir: "../..",
++  define: { __LOCAL_AUTH_BUILD__: JSON.stringify(command === "serve") },
++  server: { proxy: { "/api": process.env.API_PROXY_TARGET ?? "http://127.0.0.1:3000" } },
++}));
+diff --git a/compose.yaml b/compose.yaml
+new file mode 100644
+index 0000000..8b86aa6
+--- /dev/null
++++ b/compose.yaml
+@@ -0,0 +1,18 @@
++services:
++  postgres:
++    image: postgres:16
++    environment:
++      POSTGRES_USER: animalvs
++      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a local database password}
++      POSTGRES_DB: animalvs_dev
++    ports:
++      - "127.0.0.1:5432:5432"
++    volumes:
++      - player-data:/var/lib/postgresql/data
++    healthcheck:
++      test: ["CMD-SHELL", "pg_isready -U animalvs -d animalvs_dev"]
++      interval: 3s
++      timeout: 3s
++      retries: 10
++volumes:
++  player-data:
+diff --git a/docs/platform.md b/docs/platform.md
+new file mode 100644
+index 0000000..686d01e
+--- /dev/null
++++ b/docs/platform.md
+@@ -0,0 +1,185 @@
++---
++title: Player platform architecture and operations
++description: Trust boundaries, persistence contracts, identity configuration and verification limits.
++ms.date: 2026-11-03
++---
++
++## Architecture
++
++```mermaid
++flowchart LR
++  Browser[Vue and Vite browser] -->|Access token and intent| API[Express API]
++  API -->|Issuer, audience, signature, scope| Entra[Entra External ID]
++  API --> Store[PlayerStore]
++  Gameplay[Future trusted gameplay services] --> Store
++  Store --> PG[(PostgreSQL)]
++  API -->|Authenticated snapshot stream| Browser
++```
++
++The repository uses npm workspaces: `apps/web`, `apps/api` and
++`packages/contracts`. Shared Zod schemas validate wire and database projections.
++No browser code can invoke trusted repository methods.
++
++## Authentication
++
++Local simulation exists only in the source development entrypoint. It requires
++`NODE_ENV=development`, `LOCAL_AUTH_ENABLED=true`, a loopback database ending
++in `_dev` without connection-string query overrides, and a loopback listener.
++Local identities use their own issuer and namespace. They do not issue tokens,
++and production JWT validation rejects their credential strings.
++
++Production sign-in uses MSAL's authorization-code/PKCE redirect flow and API
++access tokens. Set these server variables:
++
++| Variable | Meaning |
++|---|---|
++| `NODE_ENV` | `production` |
++| `DATABASE_URL` | Dedicated hosted PostgreSQL connection; use deployment-managed credentials and TLS |
++| `ENTRA_ISSUER` | Exact API token issuer including tenant/version path |
++| `ENTRA_AUDIENCE` | API application ID/audience, not the SPA client ID |
++| `ENTRA_JWKS_URI` | Tenant JWKS URL on the pinned issuer origin |
++| `ENTRA_SCOPE` | Required delegated scope name, for example `access_as_user` |
++| `PORT` | API listener port, defaults to 3000 |
++
++Set `VITE_ENTRA_AUTHORITY`, `VITE_ENTRA_CLIENT_ID` and `VITE_ENTRA_SCOPE`
++before the browser build. Vite reads the repository-root `.env` for development.
++The browser development-auth constant is tied to Vite's `serve` command, not
++`NODE_ENV`; all built artifacts exclude simulated credentials.
++
++Register exact redirect/logout origins and the API's delegated permission in
++the existing Entra external tenant. Configure its sign-in user flow and consent,
++then verify actual tokens match the API issuer and audience. No real tenant
++configuration or successful live-tenant sign-in is claimed by this platform.
++
++Production authentication never fetches key locations from token headers. The
++API validates RS256 signatures, issuer, audience, subject, issued-at, expiration
++and delegated scope against configured values. Identity uses issuer/subject,
++never a supplied account ID, email or real name.
++
++Run migrations from the repository root before starting the API:
++
++```bash
++npm run migrate
++npm run build
++NODE_ENV=production LOCAL_AUTH_ENABLED=false npm start
++```
++
++Build artifacts require the SQL migration directory at runtime for the migration
++command. Run `npm run migrate` from the source release or
++`node dist/apps/api/src/migrate.js` from a release containing that directory.
++The application does not create hosted resources or validate the proposed
++hosting budget. Configure HTTPS termination, database TLS, least-privilege
++runtime/migration roles, connection limits and proxy streaming before hosting.
++
++## HTTP surface
++
++All private routes derive ownership from the verified identity. Query-string
++account selectors are rejected. There is no arbitrary state or award write API.
++
++| Method and route | Contract |
++|---|---|
++| `GET /api/config` | Public authentication mode only |
++| `GET /api/snapshot` | Private account, latest 50 completed battles, pending battle definitions, server time |
++| `GET /api/battles/:id` | Stored replay, only for a participant; history beyond the snapshot remains retrievable by ID |
++| `GET /api/events` | Bearer-authenticated fetch/SSE; initial snapshot, revision snapshots and heartbeats |
++| `PATCH /api/profile` | Strict `transactionId`, `expectedRevision`, `displayName` intent |
++| `DELETE /api/account` | Authenticated request with exactly `{"confirmation":"DELETE"}` |
++
++Clients cannot supply levels, resources, completion times, combat decisions,
++CPU inputs, damage, results or awards. Unknown fields fail with a visible error.
++Stale profile actions and conflicting transaction-ID reuse return HTTP 409.
++Authentication failures return 401/403; unavailable durable state returns 503.
++
++## Persistent contracts
++
++`accounts` stores identity, environment namespace, a monotonic revision and a
++validated account projection containing display name; all six animal levels,
++residual XP, welfare and training dates; credits, turns and reset date;
++completed facilities and pending purchases with cost/completion records.
++
++`battle_reservations` stores immutable battle definitions, participants or CPU
++profile, mode, locked statistics/bonuses, conditions, rule versions, seed and
++daily reward reservation date. `reservation_accounts` provides relational
++ownership and foreign keys.
++
++`battles` stores the complete immutable replay, ordered events, outcome and
++awards. `reward_counters` and `pair_reward_counters` persist daily reserved and
++awarded capacity. `management_transactions` persists account-scoped
++idempotency keys, intent fingerprints and results.
++
++`PlayerStore.management` is a server-only callback under an account row lock.
++It validates the resulting projection, atomically writes state/ledger/revision,
++and returns the original result for an exact retry. The callback must be pure:
++no outbound calls or effects outside the database transaction.
++
++`reserveBattle` stores frozen server inputs and reserves account/pair reward
++capacity under sorted participant locks. A retry reuses the same ID and seed.
++`completeBattle` atomically stores the replay, applies trusted XP formulas to
++the latest locked animal state, credits awards and moves reservation counters.
++Concurrent completions cannot award twice. The caller supplies game rules and
++limits; this layer does not implement combat, CPU decisions, leveling, daily
++reset rules or facility pricing.
++
++Reservation occurs when a battle is created, not when a transient matchup is
++proposed. Future game services must process durable pending battles after a
++restart using their stored seed/rules, independent of browser connections.
++This scaffold does not yet include that simulation worker.
++
++## Recovery
++
++The browser uses bearer-authenticated fetch streaming, not tokens in SSE URLs.
++The API polls durable revisions once per second, supporting separate API
++processes without an in-memory notification owner. The browser reconnects
++after two seconds, always loading a new authoritative snapshot first. It
++rejects older-revision snapshots and aborts obsolete sessions on sign-out.
++
++Connections revalidate access tokens. Expiration or database failures visibly
++interrupt the stream. While recovery fails, shown data is labeled potentially
++stale and management controls are disabled. The browser never stores progress
++or replaces missing server state with defaults. MSAL may store identity
++session material, not gameplay progression.
++
++The stream currently conveys persistent account/battle changes. Transient
++queue ownership, selection revisions, acceptance timers and matchmaking events
++must be wired when matchmaking exists; #26 is not fully complete yet.
++
++## Deletion and privacy boundaries
++
++An authenticated, explicitly confirmed deletion immediately removes the
++application account and its progression/economy/management records. Linked
++pending/completed battles, shared replay data and pair counters are removed,
++too. Other participants keep their own progress and aggregate daily counts;
++pending reward capacity is released and their revisions advance.
++
++A one-way issuer/subject fingerprint prevents an old signed-in identity from
++silently recreating an erased account. The tombstone contains no raw issuer,
++subject, account ID, name or gameplay history, but remains pseudonymous data.
++Its retention and any future deliberate re-enrollment policy require privacy
++review. This is not a claim of complete identity erasure.
++
++Deleting application data does not delete the Microsoft identity or purge
++backups. Before processing real beta accounts, define identity-provider
++deletion responsibilities, tombstone retention, legal exceptions and backup
++expiration/restore handling. Before public launch, review applicable regional
++age, privacy and consent requirements. The intended 13+ audience is not legal
++approval. No precise location or real name is required for gameplay.
++
++## Observability and validation
++
++HTTP errors emit sanitized structured logs with timestamp, OpenTelemetry
++severity fields, safe message and a random request ID. Tokens, request bodies,
++database URLs, player IDs and display names are not logged. HTTP and database
++transaction spans use the OpenTelemetry API and semantic attributes.
++A deployment may register a provider before startup; no exporter or external
++telemetry destination is configured by this scaffold. Set `service.name`,
++`service.version` and `deployment.environment` on that provider.
++
++Validation covers runtime schemas, production exclusion, signed-token
++cryptography with a local JWKS issuer, real PostgreSQL transactions/restart,
++ownership, retry safety, rollback, reward reservations, deletion and Chromium
++account/recovery flows. It does not establish real-tenant sign-in, gameplay
++integration, hosted load/cost, cross-browser parity or privacy certification.
++
++Issues #23 and #25 have a working core foundation, not blanket closure of
++their full release acceptance criteria. Integrate and verify future queue,
++battle and management services against this boundary.
+diff --git a/package.json b/package.json
+new file mode 100644
+index 0000000..92e98bd
+--- /dev/null
++++ b/package.json
+@@ -0,0 +1,36 @@
++{
++  "name": "animalvs",
++  "version": "0.1.0",
++  "private": true,
++  "type": "module",
++  "workspaces": ["apps/*", "packages/*"],
++  "engines": { "node": ">=24" },
++  "scripts": {
++    "dev:api": "node --env-file-if-exists=.env --import tsx apps/api/src/dev.ts",
++    "dev:web": "npm run dev -w @animalvs/web",
++    "migrate": "node --env-file-if-exists=.env --import tsx apps/api/src/migrate.ts",
++    "typecheck": "tsc --noEmit && vue-tsc --noEmit -p apps/web/tsconfig.json",
++    "build": "tsc -p apps/api/tsconfig.build.json && npm run build -w @animalvs/web",
++    "start": "node --env-file-if-exists=.env dist/apps/api/src/main.js",
++    "test": "node --import tsx --test tests/contracts.test.ts && node scripts/test-postgres.mjs",
++    "test:integration": "node --import tsx --test tests/platform.test.ts",
++    "test:browser": "node scripts/test-postgres.mjs --browser",
++    "test:production": "node scripts/check-production.mjs"
++  },
++  "dependencies": {
++    "@opentelemetry/api": "^1.9.0",
++    "express": "^5.1.0",
++    "helmet": "^8.1.0",
++    "jose": "^6.1.0",
++    "pg": "^8.16.0",
++    "zod": "^4.1.0"
++  },
++  "devDependencies": {
++    "@playwright/test": "^1.56.0",
++    "@types/express": "^5.0.0",
++    "@types/node": "^24.0.0",
++    "@types/pg": "^8.15.0",
++    "tsx": "^4.20.0",
++    "typescript": "^5.9.0"
++  }
++}
+diff --git a/packages/contracts/package.json b/packages/contracts/package.json
+new file mode 100644
+index 0000000..d8db648
+--- /dev/null
++++ b/packages/contracts/package.json
+@@ -0,0 +1,7 @@
++{
++  "name": "@animalvs/contracts",
++  "version": "0.1.0",
++  "private": true,
++  "type": "module",
++  "exports": "./src/index.ts"
++}
+diff --git a/packages/contracts/src/index.ts b/packages/contracts/src/index.ts
+new file mode 100644
+index 0000000..8ed84ad
+--- /dev/null
++++ b/packages/contracts/src/index.ts
+@@ -0,0 +1,100 @@
++import { z } from "zod";
++
++export const animalIds = ["tiger", "lion", "bear", "hippo", "rhino", "crocodile"] as const;
++export const animalId = z.enum(animalIds);
++const integer = z.number().int().min(0).max(2_000_000_000);
++const date = z.iso.date();
++const timestamp = z.iso.datetime();
++export const uuid = z.uuid();
++const modifiers = z.record(z.string().max(80), z.number().finite());
++
++export const animalSchema = z.strictObject({
++  animalId, level: integer.min(1), residualXp: integer,
++  welfare: integer.max(100), lastTrainingDate: date.nullable(),
++});
++export const facilitySchema = z.strictObject({ facilityId: z.string().min(1).max(80), level: integer });
++export const purchaseSchema = z.strictObject({
++  id: uuid, facilityId: z.string().min(1).max(80), targetLevel: integer.min(1),
++  completesAt: timestamp, creditsSpent: integer, turnsSpent: integer,
++});
++export const economySchema = z.strictObject({
++  credits: integer, turns: integer.max(48), lastResetDate: date,
++});
++export const accountSchema = z.strictObject({
++  id: uuid, displayName: z.string().min(1).max(40), revision: integer,
++  economy: economySchema, animals: z.array(animalSchema).length(6),
++  facilities: z.array(facilitySchema), pendingPurchases: z.array(purchaseSchema),
++}).superRefine((account, ctx) => {
++  for (const [label, ids] of [
++    ["animals", account.animals.map(animal => animal.animalId)],
++    ["facilities", account.facilities.map(facility => facility.facilityId)],
++    ["purchases", account.pendingPurchases.map(purchase => purchase.id)],
++  ] as const) {
++    if (new Set(ids).size !== ids.length) {
++      ctx.addIssue({ code: "custom", message: `Duplicate ${label} are not allowed.` });
++    }
++  }
++});
++export const profileCommandSchema = z.strictObject({
++  transactionId: uuid, expectedRevision: integer,
++  displayName: z.string().trim().min(1).max(40).regex(/^[\p{L}\p{N} _.-]+$/u),
++});
++export const deletionCommandSchema = z.strictObject({ confirmation: z.literal("DELETE") });
++
++export const lockedChoiceSchema = z.strictObject({
++  accountId: uuid.nullable(), animalId, level: integer.min(1),
++  statistics: z.strictObject({ vitality: integer, power: integer, guard: integer, speed: integer }),
++  facilityBonuses: modifiers, readinessBonuses: modifiers, xpModifier: z.number().min(0).max(10),
++});
++export const battleEventSchema = z.strictObject({
++  sequence: integer, kind: z.string().min(1).max(80),
++  actor: z.enum(["first", "second", "system"]), text: z.string().max(1000),
++  values: modifiers,
++});
++export const awardSchema = z.strictObject({
++  accountId: uuid, animalId, xp: integer, credits: integer,
++});
++export const battleDefinitionSchema = z.strictObject({
++  id: uuid, mode: z.enum(["human", "cpu"]), cpuProfileId: z.string().min(1).max(80).nullable(),
++  choices: z.tuple([lockedChoiceSchema, lockedChoiceSchema]),
++  weather: z.string().min(1).max(80), terrain: z.string().min(1).max(80),
++  conditionModifiers: modifiers,
++  rulesVersions: z.strictObject({ combat: z.string().min(1), rewards: z.string().min(1) }),
++  seed: z.string().min(1).max(256),
++});
++export const battleSchema = battleDefinitionSchema.extend({
++  events: z.array(battleEventSchema).max(10000),
++  outcome: z.enum(["first", "second", "draw"]), awards: z.array(awardSchema).max(2),
++  completedAt: timestamp,
++}).superRefine((battle, ctx) => {
++  const first = battle.choices[0].accountId;
++  const second = battle.choices[1].accountId;
++  if (!first || (battle.mode === "human" ? !second || second === first || battle.cpuProfileId !== null
++    : second !== null || !battle.cpuProfileId)) {
++    ctx.addIssue({ code: "custom", message: "Invalid battle participants or CPU profile." });
++  }
++  if (battle.events.some((event, index) => event.sequence !== index)) {
++    ctx.addIssue({ code: "custom", message: "Events must be contiguous and ordered from zero." });
++  }
++  const awarded = new Set<string>();
++  for (const award of battle.awards) {
++    if (![first, second].includes(award.accountId) || awarded.has(award.accountId) ||
++        !battle.choices.some(choice => choice.accountId === award.accountId && choice.animalId === award.animalId)) {
++      ctx.addIssue({ code: "custom", message: "Awards must belong to distinct human participants." });
++    }
++    awarded.add(award.accountId);
++  }
++});
++export const snapshotSchema = z.strictObject({
++  account: accountSchema,
++  battles: z.array(battleSchema),
++  pendingBattles: z.array(battleDefinitionSchema),
++  serverTime: timestamp,
++});
++
++/** Authoritative snapshot read from PostgreSQL; never a client write payload. */
++export type Snapshot = z.infer<typeof snapshotSchema>;
++/** Server-authored replay record, including frozen inputs and ordered results. */
++export type Battle = z.infer<typeof battleSchema>;
++/** Persisted player projection, with monotonic revision for stale-action checks. */
++export type PlayerAccount = z.infer<typeof accountSchema>;
+diff --git a/playwright.config.ts b/playwright.config.ts
+new file mode 100644
+index 0000000..7475050
+--- /dev/null
++++ b/playwright.config.ts
+@@ -0,0 +1,25 @@
++import { defineConfig } from "@playwright/test";
++
++if (!process.env.TEST_DATABASE_URL) throw new Error("Run npm run test:browser to provision an isolated database.");
++
++export default defineConfig({
++  testDir: "./tests/browser",
++  fullyParallel: false,
++  workers: 1,
++  use: { baseURL: "http://127.0.0.1:41873", trace: "retain-on-failure" },
++  webServer: [
++    {
++      command: "node --import tsx apps/api/src/dev.ts",
++      env: {
++        DATABASE_URL: process.env.TEST_DATABASE_URL, NODE_ENV: "development",
++        LOCAL_AUTH_ENABLED: "true", PORT: "31873",
++      },
++      url: "http://127.0.0.1:31873/api/config", reuseExistingServer: false,
++    },
++    {
++      command: "npm run dev -w @animalvs/web -- --port 41873 --strictPort",
++      env: { API_PROXY_TARGET: "http://127.0.0.1:31873" },
++      url: "http://127.0.0.1:41873", reuseExistingServer: false,
++    },
++  ],
++});
+diff --git a/scripts/check-production.mjs b/scripts/check-production.mjs
+new file mode 100644
+index 0000000..eb7b381
+--- /dev/null
++++ b/scripts/check-production.mjs
+@@ -0,0 +1,19 @@
++import assert from "node:assert/strict";
++import { access, readFile, readdir } from "node:fs/promises";
++import { spawnSync } from "node:child_process";
++
++await access("dist/apps/api/src/main.js");
++const files = await readdir("dist/apps/api/src");
++assert.equal(files.includes("dev.js"), false, "Local identity entrypoint must not be built.");
++for (const file of files.filter(file => file.endsWith(".js"))) {
++  assert.equal((await readFile(`dist/apps/api/src/${file}`, "utf8")).includes("local-player-one"), false);
++}
++for (const file of (await readdir("apps/web/dist/assets")).filter(file => file.endsWith(".js"))) {
++  assert.equal((await readFile(`apps/web/dist/assets/${file}`, "utf8")).includes("local-player-"), false);
++}
++const result = spawnSync(process.execPath, ["dist/apps/api/src/main.js"], {
++  env: { ...process.env, NODE_ENV: "production", LOCAL_AUTH_ENABLED: "true" }, encoding: "utf8", timeout: 10000,
++});
++assert.notEqual(result.status, 0, "Hosted API must reject the simulation flag before listening.");
++assert.match(result.stderr, /Local identity is forbidden/);
++console.log("Production artifacts exclude local identity; hosted startup rejects simulation.");
+diff --git a/scripts/test-postgres.mjs b/scripts/test-postgres.mjs
+new file mode 100644
+index 0000000..a8038b4
+--- /dev/null
++++ b/scripts/test-postgres.mjs
+@@ -0,0 +1,46 @@
++import { mkdtemp, rm } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { execFileSync, spawnSync } from "node:child_process";
++import { createServer } from "node:net";
++
++const browser = process.argv.includes("--browser");
++const run = env => spawnSync(process.execPath, browser
++  ? ["node_modules/@playwright/test/cli.js", "test"]
++  : ["--import", "tsx", "--test", "tests/platform.test.ts"], { stdio: "inherit", env }).status ?? 1;
++
++if (process.env.TEST_DATABASE_URL) {
++  process.exitCode = run(process.env);
++} else {
++  const bin = process.env.PG_BIN ?? "/usr/lib/postgresql/16/bin";
++  const directory = await mkdtemp(join(tmpdir(), "animalvs-test-pg-"));
++  const listener = createServer();
++  await new Promise(resolve => listener.listen(0, "127.0.0.1", resolve));
++  const address = listener.address();
++  if (!address || typeof address === "string") throw new Error("Cannot allocate database test port.");
++  const port = address.port;
++  await new Promise(resolve => listener.close(resolve));
++  const data = join(directory, "data");
++  let running = false;
++  try {
++    const args = ["-D", data, "-A", "trust", "-U", "animalvs", "--no-locale", "--encoding=UTF8"];
++    if (process.env.PG_SHARE) args.push("-L", process.env.PG_SHARE);
++    execFileSync(join(bin, "initdb"), args, { stdio: "pipe" });
++    execFileSync(join(bin, "pg_ctl"), [
++      "-D", data, "-l", join(directory, "server.log"), "-o", `-h 127.0.0.1 -p ${port} -k ${directory}`, "-w", "start",
++    ], { stdio: "pipe" });
++    running = true;
++    execFileSync("createdb", ["-h", "127.0.0.1", "-p", String(port), "-U", "animalvs", "animalvs_dev"]);
++    process.exitCode = run({
++      ...process.env, TEST_DATABASE_URL: `postgresql://animalvs@127.0.0.1:${port}/animalvs_dev`,
++      PG_TEST_DATA: data, PG_TEST_CTL: join(bin, "pg_ctl"),
++    });
++  } catch (error) {
++    console.error("Isolated PostgreSQL verification failed. Install PostgreSQL server tools or set PG_BIN/PG_SHARE (or TEST_DATABASE_URL for integration tests).");
++    if (error instanceof Error) console.error(error.message);
++    process.exitCode = 1;
++  } finally {
++    if (running) execFileSync(join(bin, "pg_ctl"), ["-D", data, "-m", "immediate", "-w", "stop"], { stdio: "pipe" });
++    await rm(directory, { recursive: true, force: true });
++  }
++}
+diff --git a/tests/browser/player.spec.ts b/tests/browser/player.spec.ts
+new file mode 100644
+index 0000000..810cd03
+--- /dev/null
++++ b/tests/browser/player.spec.ts
+@@ -0,0 +1,61 @@
++import { test, expect } from "@playwright/test";
++
++test("saved profile survives sign-out/reload and never crosses accounts", async ({ page }, testInfo) => {
++  await page.goto("/");
++  await page.getByRole("button", { name: "Use local player one" }).click();
++  await expect(page.getByRole("status")).toHaveText("Connected to server");
++  await expect(page.getByRole("heading", { name: "Bengal tiger" })).toBeVisible();
++  await page.getByLabel("Display name (not your real name)").fill("Persistent Keeper");
++  await page.getByRole("button", { name: "Save display name" }).click();
++  await expect(page.getByRole("heading", { name: "Persistent Keeper" })).toBeVisible();
++  await page.getByRole("button", { name: "Sign out", exact: true }).click();
++  await expect(page.getByRole("heading", { name: "Your collection" })).toHaveCount(0);
++  await page.getByRole("button", { name: "Use local player two" }).click();
++  await expect(page.getByRole("status")).toHaveText("Connected to server");
++  await expect(page.getByRole("heading", { name: "Persistent Keeper" })).toHaveCount(0);
++  await page.getByRole("button", { name: "Sign out", exact: true }).click();
++  await page.reload();
++  await page.getByRole("button", { name: "Use local player one" }).click();
++  await expect(page.getByRole("heading", { name: "Persistent Keeper" })).toBeVisible();
++  expect(await page.evaluate(() => Object.keys(localStorage))).toEqual([]);
++  await page.setViewportSize({ width: 390, height: 844 });
++  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
++  await page.screenshot({ path: testInfo.outputPath("mobile-player.png"), fullPage: true });
++});
++
++test("lost stream is visible and reconnect recovers the server snapshot", async ({ page }) => {
++  await page.route("**/api/events", route => route.abort());
++  await page.goto("/");
++  await page.getByRole("button", { name: "Use local player two" }).click();
++  await expect(page.getByRole("status")).toHaveText("Connection lost");
++  await expect(page.getByRole("alert")).toContainText("Retrying from the server");
++  await expect(page.getByRole("button", { name: "Save display name" })).toBeDisabled();
++  await page.unroute("**/api/events");
++  await expect(page.getByRole("status")).toHaveText("Connected to server", { timeout: 10000 });
++  await expect(page.getByRole("alert")).toHaveCount(0);
++});
++
++test("unavailable progress never renders fabricated local state", async ({ page }) => {
++  await page.route("**/api/snapshot", route => route.fulfill({
++    status: 503, contentType: "application/json",
++    body: '{"error":{"message":"Authoritative progress is unavailable. Try again."}}',
++  }));
++  await page.goto("/");
++  await page.getByRole("button", { name: "Use local player one" }).click();
++  await expect(page.getByRole("alert")).toContainText("Authoritative progress is unavailable");
++  await expect(page.getByRole("heading", { name: "Your collection" })).toHaveCount(0);
++});
++
++test("deletion requires explicit confirmation and removes application access", async ({ page }) => {
++  await page.goto("/");
++  await page.getByRole("button", { name: "Use local player two" }).click();
++  await expect(page.getByRole("status")).toHaveText("Connected to server");
++  await page.getByText("Delete application data", { exact: true }).click();
++  await expect(page.getByRole("button", { name: "Delete my application data" })).toBeDisabled();
++  await page.getByLabel("Type DELETE to confirm").fill("DELETE");
++  await page.getByRole("button", { name: "Delete my application data" }).click();
++  await expect(page.getByRole("status")).toHaveText("Application data deleted");
++  await page.getByRole("button", { name: "Use local player two" }).click();
++  await expect(page.getByRole("alert")).toContainText("Application data was deleted");
++  await expect(page.getByRole("heading", { name: "Your collection" })).toHaveCount(0);
++});
+diff --git a/tests/contracts.test.ts b/tests/contracts.test.ts
+new file mode 100644
+index 0000000..54454ce
+--- /dev/null
++++ b/tests/contracts.test.ts
+@@ -0,0 +1,43 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { readFile } from "node:fs/promises";
++import { profileCommandSchema } from "../packages/contracts/src/index.js";
++import { localConfig, productionConfig } from "../apps/api/src/config.js";
++
++test("strict intents reject every authoritative field family", () => {
++  const valid = { transactionId: "899bc0de-d540-4013-b356-5c0da9c5e488", expectedRevision: 0, displayName: "Tiger Fan" };
++  for (const key of ["accountId", "level", "statistics", "bonuses", "turns", "credits", "resources",
++    "completesAt", "cpuDecision", "rolls", "damage", "winner", "awards", "residualXp"]) {
++    assert.equal(profileCommandSchema.safeParse({ ...valid, [key]: 100 }).success, false, key);
++  }
++  assert.equal(profileCommandSchema.parse(valid).displayName, valid.displayName);
++});
++
++test("local identity is explicit and restricted to a dedicated loopback database", () => {
++  const local = { NODE_ENV: "development", LOCAL_AUTH_ENABLED: "true", DATABASE_URL: "postgresql://localhost/animalvs_dev" };
++  assert.equal(localConfig(local).port, 3000);
++  for (const env of [
++    { ...local, NODE_ENV: "production" }, { ...local, NODE_ENV: "test" },
++    { ...local, LOCAL_AUTH_ENABLED: "false" }, { ...local, DATABASE_URL: "postgresql://remote/animalvs_dev" },
++    { ...local, DATABASE_URL: "postgresql://localhost/animalvs" },
++    { ...local, DATABASE_URL: "postgresql://localhost/animalvs_dev?host=remote" },
++  ]) assert.throws(() => localConfig(env));
++  assert.throws(() => productionConfig({ NODE_ENV: "production", LOCAL_AUTH_ENABLED: "true" }));
++  assert.throws(() => productionConfig({ NODE_ENV: "production" }));
++});
++
++test("hosted configuration pins JWKS origin and excludes local data", () => {
++  const config = {
++    NODE_ENV: "production", DATABASE_URL: "postgresql://database/animalvs",
++    ENTRA_ISSUER: "https://tenant.ciamlogin.com/tenant/v2.0", ENTRA_AUDIENCE: "api-id",
++    ENTRA_JWKS_URI: "https://tenant.ciamlogin.com/keys", ENTRA_SCOPE: "access_as_user",
++  };
++  assert.equal(productionConfig(config).ENTRA_AUDIENCE, "api-id");
++  assert.throws(() => productionConfig({ ...config, ENTRA_JWKS_URI: "https://other.invalid/keys" }));
++  assert.throws(() => productionConfig({ ...config, DATABASE_URL: "postgresql://localhost/animalvs_dev" }));
++});
++
++test("production entrypoint cannot import local credentials", async () => {
++  const build = JSON.parse(await readFile("apps/api/tsconfig.build.json", "utf8")) as { include: string[] };
++  assert.deepEqual(build.include, ["src/main.ts", "src/migrate.ts"]);
++});
+diff --git a/tests/platform.test.ts b/tests/platform.test.ts
+new file mode 100644
+index 0000000..b01acb9
+--- /dev/null
++++ b/tests/platform.test.ts
+@@ -0,0 +1,260 @@
++import { after, before, test } from "node:test";
++import assert from "node:assert/strict";
++import { randomUUID } from "node:crypto";
++import { execFileSync } from "node:child_process";
++import { Pool } from "pg";
++import { createServer, type Server } from "node:http";
++import { exportJWK, generateKeyPair, SignJWT } from "jose";
++import { accountSchema, battleDefinitionSchema, snapshotSchema, type Battle } from "../packages/contracts/src/index.js";
++import { databasePool, migrate } from "../apps/api/src/database.js";
++import { PlayerStore } from "../apps/api/src/store.js";
++import { createApp } from "../apps/api/src/app.js";
++import { entraAuthenticator } from "../apps/api/src/auth.js";
++import { PlatformError } from "../apps/api/src/errors.js";
++
++const url = process.env.TEST_DATABASE_URL;
++if (!url) throw new Error("TEST_DATABASE_URL is required; run npm test for an isolated PostgreSQL server.");
++let admin = databasePool(url);
++const schema = `test_${randomUUID().replaceAll("-", "")}`;
++let pool: Pool;
++let store: PlayerStore;
++let server: Server;
++let base: string;
++let a: string;
++let b: string;
++let outsider: string;
++const identities = {
++  a: { issuer: "urn:test", subject: "player-a" },
++  b: { issuer: "urn:test", subject: "player-b" },
++  c: { issuer: "urn:test", subject: "player-c" },
++};
++function scopedPool() {
++  return new Pool({ connectionString: url, options: `-c search_path=${schema}`, max: 10 });
++}
++async function listen(instance: Server) {
++  await new Promise<void>(resolve => instance.listen(0, "127.0.0.1", resolve));
++  const address = instance.address();
++  assert.ok(address && typeof address !== "string");
++  return `http://127.0.0.1:${address.port}`;
++}
++async function close(instance: Server) {
++  instance.closeAllConnections();
++  await new Promise<void>((resolve, reject) => instance.close(error => error ? reject(error) : resolve()));
++}
++function request(path: string, player = "a", init: RequestInit = {}) {
++  return fetch(`${base}${path}`, {
++    ...init, headers: { authorization: `Bearer ${player}`, "content-type": "application/json", ...init.headers },
++  });
++}
++function definition(id = randomUUID(), human = true) {
++  const choice = (accountId: string | null) => ({
++    accountId, animalId: "tiger", level: 1,
++    statistics: { vitality: 60, power: 70, guard: 45, speed: 65 },
++    facilityBonuses: {}, readinessBonuses: {}, xpModifier: 1,
++  });
++  return battleDefinitionSchema.parse({
++    id, mode: human ? "human" : "cpu", cpuProfileId: human ? null : "cpu-balanced-v1",
++    choices: [choice(a), choice(human ? b : null)],
++    weather: "clear", terrain: "grassland", conditionModifiers: { power: 1 },
++    rulesVersions: { combat: "fixture-v1", rewards: "fixture-v1" }, seed: "stored-seed",
++  });
++}
++function result(input = definition()): Battle {
++  return {
++    ...input, events: [{ sequence: 0, kind: "outcome", actor: "system", text: "Fixture result", values: {} }],
++    outcome: "first", awards: [{ accountId: a, animalId: "tiger", xp: 10, credits: 5 }],
++    completedAt: "2026-11-03T20:00:00.000Z",
++  };
++}
++before(async () => {
++  await admin.query(`CREATE SCHEMA "${schema}"`);
++  pool = scopedPool();
++  await Promise.all([migrate(pool), migrate(pool)]);
++  store = new PlayerStore(pool, "entra");
++  [a, b, outsider] = await Promise.all([
++    store.accountFor(identities.a), store.accountFor(identities.b), store.accountFor(identities.c),
++  ]);
++  await startApi();
++});
++async function startApi() {
++  server = createServer(createApp(store, async req => {
++    const player = req.header("authorization")?.slice(7);
++    if (player !== "a" && player !== "b" && player !== "c") throw new PlatformError(401, "unauthenticated", "Sign in.");
++    return identities[player];
++  }, { authMode: "entra", streamIntervalMs: 25 }));
++  base = await listen(server);
++}
++after(async () => {
++  if (server) await close(server);
++  if (pool) await pool.end();
++  await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
++  await admin.end();
++});
++
++test("stable identity, initial six animals, explicit unauthenticated and tampering errors", async () => {
++  assert.equal(await store.accountFor(identities.a), a);
++  const snapshot = snapshotSchema.parse(await (await request("/api/snapshot")).json());
++  assert.equal(snapshot.account.animals.length, 6);
++  assert.equal(snapshot.account.economy.turns, 24);
++  assert.equal((await request("/api/snapshot", "invalid")).status, 401);
++  assert.equal((await request(`/api/snapshot?accountId=${b}`)).status, 400);
++  const command = { transactionId: randomUUID(), expectedRevision: 0, displayName: "Player A" };
++  for (const key of ["accountId", "credits", "level", "damage", "winner", "awards", "cpuDecision"]) {
++    assert.equal((await request("/api/profile", "a", { method: "PATCH", body: JSON.stringify({ ...command, [key]: b }) })).status, 400);
++  }
++  for (const path of ["/api/battles", "/api/queue", `/api/accounts/${b}`]) {
++    assert.equal((await request(path, "a", { method: "POST", body: "{}" })).status, 404);
++  }
++});
++
++test("management is idempotent, stale-safe, concurrent and transactional", async () => {
++  const initial = (await store.snapshot(a)).account;
++  const command = { transactionId: randomUUID(), expectedRevision: initial.revision, displayName: "Tiger Keeper" };
++  const responses = await Promise.all([1, 2].map(() => request("/api/profile", "a", { method: "PATCH", body: JSON.stringify(command) })));
++  assert.ok(responses.every(response => response.status === 200));
++  assert.deepEqual(await responses[0]!.json(), await responses[1]!.json());
++  assert.equal((await store.snapshot(a)).account.revision, initial.revision + 1);
++  assert.equal((await request("/api/profile", "a", {
++    method: "PATCH", body: JSON.stringify({ ...command, displayName: "Changed" }),
++  })).status, 409);
++  assert.equal((await request("/api/profile", "a", {
++    method: "PATCH", body: JSON.stringify({ ...command, transactionId: randomUUID() }),
++  })).status, 409);
++  const state = (await store.snapshot(a)).account;
++  const trained = await store.management(a, randomUUID(), state.revision, { kind: "fixture-training" }, current => ({
++    ...current,
++    economy: { credits: 150, turns: 20, lastResetDate: "2026-11-03" },
++    animals: current.animals.map(animal => ({ ...animal, welfare: 80, lastTrainingDate: "2026-11-03" })),
++    facilities: [{ facilityId: "training-ground", level: 1 }],
++    pendingPurchases: [{ id: randomUUID(), facilityId: "shelter", targetLevel: 1, completesAt: "2026-11-04T00:00:00.000Z", creditsSpent: 20, turnsSpent: 4 }],
++  }));
++  await assert.rejects(store.management(a, randomUUID(), trained.revision, { invalid: true }, current => ({
++    ...current, economy: { ...current.economy, credits: -1 },
++  })));
++  assert.deepEqual((await store.snapshot(a)).account, trained);
++  const simultaneous = await Promise.allSettled([1, 2].map(n => store.management(
++    a, randomUUID(), trained.revision, { n }, current => ({ ...current, displayName: `Keeper ${n}` }))));
++  assert.equal(simultaneous.filter(item => item.status === "fulfilled").length, 1);
++});
++
++test("frozen records, reservations, immutable ordered replay and awards persist exactly once", async () => {
++  const pending = definition();
++  await Promise.all([1, 2].map(() => store.reserveBattle(pending, "2026-11-03", { account: 10, pair: 10 })));
++  assert.equal((await store.snapshot(a)).pendingBattles[0]?.seed, pending.seed);
++  const completed = result(pending);
++  const animal = (await store.snapshot(a)).account.animals[0]!;
++  const before = (await store.snapshot(a)).account.economy.credits;
++  await Promise.all([1, 2].map(() => store.completeBattle(completed, current => ({
++    ...current.animals.find(item => item.animalId === animal.animalId)!, residualXp: 10,
++  }))));
++  assert.equal((await store.snapshot(a)).account.economy.credits, before + 5);
++  assert.deepEqual(await store.battle(b, pending.id), completed);
++  assert.equal((await request(`/api/battles/${pending.id}`, "c")).status, 404);
++  assert.equal((await store.snapshot(outsider)).battles.length, 0);
++  await assert.rejects(store.completeBattle({ ...completed, seed: "changed" }, () => animal));
++  await assert.rejects(store.completeBattle({ ...completed, events: [{ ...completed.events[0], sequence: 2 }] }, () => animal));
++  const counters = await pool.query<{ reserved: number; awarded: number }>("SELECT reserved,awarded FROM reward_counters WHERE account_id=$1 AND mode='human'", [a]);
++  assert.deepEqual(counters.rows[0], { reserved: 0, awarded: 1 });
++  const pair = await pool.query("SELECT reserved,awarded FROM pair_reward_counters");
++  assert.deepEqual(pair.rows[0], { reserved: 0, awarded: 1 });
++});
++
++test("CPU records and reward limits are server controlled; failing reservations roll back", async () => {
++  const cpu = definition(randomUUID(), false);
++  await store.reserveBattle(cpu, "2026-11-04", { account: 1, pair: 1 });
++  await assert.rejects(store.reserveBattle(definition(randomUUID(), false), "2026-11-04", { account: 1, pair: 1 }));
++  assert.equal((await pool.query("SELECT count(*)::int AS count FROM battle_reservations WHERE reward_date='2026-11-04'")).rows[0].count, 1);
++  assert.equal((await store.snapshot(a)).pendingBattles[0]?.cpuProfileId, "cpu-balanced-v1");
++});
++
++test("authenticated SSE sends fresh authoritative snapshots on connect and changes", { timeout: 10000 }, async () => {
++  const controller = new AbortController();
++  const response = await request("/api/events", "a", { signal: controller.signal });
++  assert.equal(response.status, 200);
++  const reader = response.body!.getReader();
++  try {
++    const first = new TextDecoder().decode((await reader.read()).value);
++    assert.match(first, /event: snapshot/);
++    assert.match(first, /stored-seed/);
++    const account = (await store.snapshot(a)).account;
++    await store.profile(a, { transactionId: randomUUID(), expectedRevision: account.revision, displayName: "Recovered Keeper" });
++    let updated = "";
++    for (let attempt = 0; attempt < 20 && !updated.includes("Recovered Keeper"); attempt++) {
++      updated += new TextDecoder().decode((await reader.read()).value);
++    }
++    assert.match(updated, /Recovered Keeper/);
++  } finally {
++    await reader.cancel();
++    controller.abort();
++  }
++});
++
++test("API/pool restart (and isolated PostgreSQL restart) recover records without granting twice", async () => {
++  const snapshot = await store.snapshot(a);
++  await close(server);
++  await pool.end();
++  await admin.end();
++  if (process.env.PG_TEST_CTL && process.env.PG_TEST_DATA) {
++    execFileSync(process.env.PG_TEST_CTL, [
++      "-D", process.env.PG_TEST_DATA, "-l", `${process.env.PG_TEST_DATA}/../server.log`,
++      "-m", "fast", "-w", "restart",
++    ], { stdio: "pipe", timeout: 15000 });
++  }
++  pool = scopedPool();
++  admin = databasePool(url!);
++  store = new PlayerStore(pool, "entra");
++  await startApi();
++  const recovered = await store.snapshot(a);
++  assert.deepEqual(recovered.account, snapshot.account);
++  assert.deepEqual(recovered.battles, snapshot.battles);
++  assert.deepEqual(recovered.pendingBattles, snapshot.pendingBattles);
++});
++
++test("deletion removes linked records and prevents silent recreation", async () => {
++  await store.reserveBattle(definition(), "2026-11-05", { account: 1, pair: 1 });
++  const account = (await store.snapshot(a)).account;
++  accountSchema.parse(account);
++  assert.equal((await request("/api/account", "a", { method: "DELETE", body: "{}" })).status, 400);
++  assert.equal((await request("/api/account", "a", { method: "DELETE", body: '{"confirmation":"DELETE"}' })).status, 204);
++  await assert.rejects(store.snapshot(a));
++  await assert.rejects(store.accountFor(identities.a));
++  assert.equal((await store.snapshot(b)).battles.length, 0);
++  for (const table of ["accounts", "management_transactions", "reservation_accounts", "reward_counters"]) {
++    const column = table === "accounts" ? "id" : "account_id";
++    assert.equal((await pool.query(`SELECT count(*)::int AS count FROM ${table} WHERE ${column}=$1`, [a])).rows[0].count, 0);
++  }
++  assert.equal((await pool.query("SELECT count(*)::int AS count FROM battle_reservations")).rows[0].count, 0);
++  assert.equal((await pool.query("SELECT count(*)::int AS count FROM pair_reward_counters")).rows[0].count, 0);
++  assert.equal((await pool.query("SELECT sum(reserved)::int AS count FROM reward_counters WHERE account_id=$1", [b])).rows[0].count, 0);
++});
++
++test("production JWT boundary validates signature, issuer, audience, expiry and scope", async () => {
++  const { publicKey, privateKey } = await generateKeyPair("RS256");
++  const jwk = { ...await exportJWK(publicKey), kid: "test-key", alg: "RS256", use: "sig" };
++  const jwks = createServer((_request, response) => {
++    response.setHeader("content-type", "application/json");
++    response.end(JSON.stringify({ keys: [jwk] }));
++  });
++  const origin = await listen(jwks);
++  const auth = entraAuthenticator({ issuer: "https://issuer.test/v2.0", audience: "api", jwksUri: origin, scope: "access_as_user" });
++  const jwtServer = createServer(createApp(store, auth, { authMode: "entra" }));
++  const endpoint = await listen(jwtServer);
++  const token = (overrides: { issuer?: string; audience?: string; scope?: string; expires?: number } = {}) =>
++    new SignJWT({ scp: overrides.scope ?? "access_as_user" })
++      .setProtectedHeader({ alg: "RS256", kid: "test-key" })
++      .setSubject("jwt-player").setIssuer(overrides.issuer ?? "https://issuer.test/v2.0")
++      .setAudience(overrides.audience ?? "api").setIssuedAt()
++      .setExpirationTime(overrides.expires ?? Math.floor(Date.now() / 1000) + 60).sign(privateKey);
++  try {
++    const fetchToken = (credential: string) => fetch(`${endpoint}/api/snapshot`, { headers: { authorization: `Bearer ${credential}` } });
++    assert.equal((await fetchToken(await token())).status, 200);
++    for (const invalid of [
++      await token({ issuer: "https://other.test" }), await token({ audience: "other-api" }),
++      await token({ expires: 1 }), "local-player-one", `${await token()}invalid`,
++    ]) assert.equal((await fetchToken(invalid)).status, 401);
++    assert.equal((await fetchToken(await token({ scope: "other" }))).status, 403);
++  } finally {
++    await close(jwtServer);
++    await close(jwks);
++  }
++});
+diff --git a/tsconfig.json b/tsconfig.json
+new file mode 100644
+index 0000000..08bc964
+--- /dev/null
++++ b/tsconfig.json
+@@ -0,0 +1,16 @@
++{
++  "compilerOptions": {
++    "target": "ES2023",
++    "module": "NodeNext",
++    "moduleResolution": "NodeNext",
++    "strict": true,
++    "noUncheckedIndexedAccess": true,
++    "exactOptionalPropertyTypes": true,
++    "esModuleInterop": true,
++    "skipLibCheck": true,
++    "resolveJsonModule": true,
++    "types": ["node"]
++  },
++  "include": ["apps/api/src/**/*.ts", "packages/**/*.ts", "tests/**/*.ts", "playwright.config.ts"],
++  "exclude": ["node_modules", "dist"]
++}
