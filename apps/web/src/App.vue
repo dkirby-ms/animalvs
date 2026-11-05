@@ -82,6 +82,51 @@ onMounted(() => { void player.initialize(); });
         </div>
       </section>
 
+      <section class="panel" aria-labelledby="matchmaking-title">
+        <h2 id="matchmaking-title">Matchmaking</h2>
+        <p aria-live="polite">Status: {{ snapshot.matchmaking.status }}</p>
+        <p v-if="snapshot.matchmaking.status === 'proposed' && snapshot.matchmaking.accepted">
+          Proposal accepted. Waiting for the other player.
+        </p>
+        <p v-if="snapshot.matchmaking.expiresAt">
+          Proposal expires at {{ snapshot.matchmaking.expiresAt }}.
+        </p>
+        <p v-if="snapshot.matchmaking.status === 'accepted'">
+          Both players accepted. The match service is not part of this platform update.
+        </p>
+        <div class="actions">
+          <button
+            v-if="['idle', 'declined', 'cancelled', 'expired'].includes(snapshot.matchmaking.status)"
+            :disabled="busy || !connected"
+            @click="player.matchmakingAction('enqueue')"
+          >
+            Find a match
+          </button>
+          <button
+            v-if="snapshot.matchmaking.status === 'queued'"
+            :disabled="busy || !connected"
+            @click="player.matchmakingAction('cancel')"
+          >
+            Cancel matchmaking
+          </button>
+          <template v-if="snapshot.matchmaking.status === 'proposed'">
+            <button
+              v-if="!snapshot.matchmaking.accepted"
+              :disabled="busy || !connected"
+              @click="player.matchmakingAction('accept')"
+            >
+              Accept proposal
+            </button>
+            <button
+              :disabled="busy || !connected"
+              @click="player.matchmakingAction('decline')"
+            >
+              Decline proposal
+            </button>
+          </template>
+        </div>
+      </section>
+
       <section class="panel">
         <h2>Account settings</h2>
         <form @submit.prevent="player.saveName(displayName)">

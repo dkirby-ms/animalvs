@@ -1,0 +1,108 @@
+{
+  "task_id": "p1-platform-delivery",
+  "task_slug": "p1-platform-delivery",
+  "session_name": "Remaining P1 Platform Delivery",
+  "parent_task": null,
+  "child_tasks": [],
+  "mode": "manual",
+  "active_phase": "implementation",
+  "status": "implementation_complete",
+  "session_status": "awaiting_review",
+  "artifact_paths": {
+    "research": null,
+    "plan": ".copilot-tracking/plans/2026-11-04/p1-platform-delivery-plan.md",
+    "critique": ".copilot-tracking/reviews/plans/2026-11-04/p1-platform-delivery-plan-critique.md",
+    "changes": ".copilot-tracking/changes/2026-11-04/p1-platform-delivery-changes.md",
+    "review": ".copilot-tracking/reviews/logs/2026-11-04/p1-platform-delivery-review.md"
+  },
+  "documents": {
+    "research": [],
+    "plan": [".copilot-tracking/plans/2026-11-04/p1-platform-delivery-plan.md"],
+    "critique": [".copilot-tracking/reviews/plans/2026-11-04/p1-platform-delivery-plan-critique.md"],
+    "changes": [".copilot-tracking/changes/2026-11-04/p1-platform-delivery-changes.md"],
+    "review": []
+  },
+  "confirmed_decisions": [
+    {
+      "decision": "Scope remaining open P1 issues",
+      "status": "current",
+      "evidence": "User requests review and completion of other open P1 delivery issues after reviewing #23 and #25. Active scope is #24 and #26; #27 is explicitly deferred until backup policy is available, and #25 remains open with only minimum overlap allowed for #26."
+    },
+    {
+      "decision": "RPI planning mode",
+      "status": "current",
+      "evidence": "User explicitly requests the HVE RPI workflow. This is a standalone, user-owned plan; no GitHub mutation is authorized."
+    },
+    {
+      "decision": "Implementation foundation",
+      "status": "current",
+      "evidence": "Existing repository is TypeScript/Express, Vue/Vite and PostgreSQL; use current code and GDD as evidence, not as a reason to expand into unrelated P2-P8 work."
+    },
+    {
+      "decision": "D1 live Entra verification scope",
+      "status": "resolved",
+      "evidence": "User confirmed a live test tenant and interactive browser sign-in access, added Entra values to .env, confirmed the database is dedicated/disposable non-production, and authorized loading .env solely as process environment without displaying or recording values."
+    },
+    {
+      "decision": "Runtime-only .env use for live Entra verification",
+      "status": "resolved",
+      "evidence": "User confirmed allow_env_runtime=true. Values may be loaded only into processes for the live check; never inspect, display, or record them."
+    },
+    {
+      "decision": "Database remediation path",
+      "status": "current",
+      "evidence": "Superseded by the user's approval to add explicit Entra auth to the loopback-only development API, preserving local simulation as default."
+    },
+    {
+      "decision": "D7 development-stage Entra verification",
+      "status": "resolved",
+      "evidence": "User clarified no production instance is running and approved a plan update to add Entra auth to the loopback-only development API while keeping local simulation as default; use the confirmed dedicated disposable _dev database."
+    },
+    {
+      "decision": "Local PostgreSQL credential correction",
+      "status": "resolved",
+      "evidence": "User confirmed the repository-root .env update. Sanitized connectivity succeeded against the loopback _dev database, and the development API applied schema migrations 1 and 2. The database role was not changed."
+    },
+    {
+      "decision": "Entra SPA authority discovery configuration",
+      "status": "resolved",
+      "evidence": "User confirmed updating VITE_ENTRA_AUTHORITY. A sanitized check returned valid discovery metadata matching the API issuer, and the browser reached the Microsoft sign-in page. No configuration values or account identifiers were recorded."
+    },
+    {
+      "decision": "Local Entra redirect origin",
+      "status": "resolved",
+      "evidence": "User identified the AADSTS50011 mismatch and directed using localhost instead of 127.0.0.1. The local app and API proxy both respond at http://localhost:5173, and the browser now uses that origin. The local API remains bound to 127.0.0.1."
+    },
+    {
+      "decision": "D2 matchmaking delivery boundary",
+      "status": "resolved",
+      "evidence": "User selected the issue-level server-owned matchmaking state lifecycle, authenticated live notifications, authoritative reconnect snapshot and stored-result recovery. Full matching policy, CPU fallback and combat are deferred."
+    },
+    {
+      "decision": "D3 matchmaking transport",
+      "status": "resolved",
+      "evidence": "User selected authenticated fetch/SSE for server-to-client events and authoritative snapshots, with client commands remaining on authenticated HTTP."
+    },
+    {
+      "decision": "D4 privacy jurisdiction and review owner",
+      "status": "resolved",
+      "evidence": "User scoped the future review to the US and designated themselves as review owner. No legal qualification or approval is inferred; issue #27 is deferred."
+    },
+    {
+      "decision": "D5 defer issue #27 changes",
+      "status": "deferred",
+      "evidence": "User selected proceeding with #24 and #26 only and deferring all #27 changes until backup policy is available. Issue #27 remains a follow-up and is not claimed complete."
+    },
+    {
+      "decision": "D6 narrow deletion cleanup for new #26 state",
+      "status": "resolved",
+      "evidence": "After PC-005 identified account-linked matchmaking rows missing from existing account deletion, the user allowed only cleanup of newly introduced matchmaking records through the existing deletion path. Broader #27 privacy, retention, backup, and deletion-policy work remains deferred."
+    }
+  ],
+  "blockers": [],
+  "next_action": {
+    "phase": "review",
+    "action": "Optional standalone /hve-core:rpi-review. P01-P03 and all tasks complete: user-attested live Entra sign-in, persistence/recovery, live connection and test-account deletion passed on 2026-11-05. Final typecheck, 5 contract/config tests, 9 isolated API tests, 5 browser tests, build and production-boundary checks passed. Owned verification services and ephemeral regression container cleaned up. No GitHub mutations, commits or pushes. Keep #25 open and broader #27 deferred; no issue closure or review verdict inferred."
+  },
+  "prioritized_follow_ups": []
+}

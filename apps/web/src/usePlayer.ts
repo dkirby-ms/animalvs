@@ -1,6 +1,8 @@
 import { onBeforeUnmount, ref, shallowRef } from "vue";
 import { z } from "zod";
-import { snapshotSchema, type Snapshot } from "../../../packages/contracts/src/index.js";
+import {
+  matchmakingStateSchema, snapshotSchema, type Snapshot,
+} from "../../../packages/contracts/src/index.js";
 import { initializeEntra, type PlayerAuth } from "./auth.js";
 
 const errorSchema = z.object({ error: z.object({ message: z.string() }) });
@@ -31,8 +33,20 @@ export function usePlayer() {
   }
 
   function accept(next: Snapshot) {
-    if (!snapshot.value || next.account.id !== snapshot.value.account.id ||
-        next.account.revision >= snapshot.value.account.revision) snapshot.value = next;
+    const current = snapshot.value;
+    if (!current || next.account.id !== current.account.id) {
+      snapshot.value = next;
+      return;
+    }
+    const useNextAccount = next.account.revision >= current.account.revision;
+    const useNextMatchmaking = next.matchmaking.revision >= current.matchmaking.revision;
+    snapshot.value = {
+      ...next,
+      account: useNextAccount ? next.account : current.account,
+      battles: useNextAccount ? next.battles : current.battles,
+      pendingBattles: useNextAccount ? next.pendingBattles : current.pendingBattles,
+      matchmaking: useNextMatchmaking ? next.matchmaking : current.matchmaking,
+    };
   }
 
   async function fetchPrivate(path: string, init: RequestInit, signal: AbortSignal) {
@@ -168,6 +182,40 @@ export function usePlayer() {
     } finally { if (current === generation) busy.value = false; }
   }
 
+  async function matchmakingAction(action: "enqueue" | "cancel" | "accept" | "decline") {
+    const active = controller;
+    const current = snapshot.value;
+    const session = generation;
+    if (!active || !current || !connected.value) return;
+    const command: { expectedRevision: number; matchId?: string } = {
+      expectedRevision: current.matchmaking.revision,
+    };
+    if (action === "accept" || action === "decline") {
+      if (!current.matchmaking.matchId) {
+        error.value = "The match proposal is unavailable. Reload authoritative progress.";
+        return;
+      }
+      command.matchId = current.matchmaking.matchId;
+    }
+    busy.value = true;
+    try {
+      const response = await fetchPrivate(`matchmaking/${action}`, {
+        method: "POST", body: JSON.stringify(command),
+      }, active.signal);
+      const matchmaking = matchmakingStateSchema.parse(await response.json());
+      if (session === generation && snapshot.value) {
+        accept({ ...snapshot.value, matchmaking });
+        error.value = "";
+      }
+    } catch (failure) {
+      if (session === generation) {
+        error.value = failure instanceof Error ? failure.message : "Matchmaking state could not be updated.";
+      }
+    } finally {
+      if (session === generation) busy.value = false;
+    }
+  }
+
   async function deleteAccount() {
     const active = controller;
     const current = generation;
@@ -185,5 +233,8 @@ export function usePlayer() {
   }
 
   onBeforeUnmount(stop);
-  return { snapshot, error, status, connected, busy, local, ready, signedIn, initialize, start, signIn, signOut, saveName, deleteAccount };
+  return {
+    snapshot, error, status, connected, busy, local, ready, signedIn, initialize, start, signIn,
+    signOut, saveName, matchmakingAction, deleteAccount,
+  };
 }

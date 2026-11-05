@@ -35,14 +35,20 @@ export async function transaction<T>(pool: Pool, action: (client: PoolClient) =>
 
 /** Apply versioned SQL atomically under a transaction-scoped migration lock. Run from repository root. */
 export async function migrate(pool: Pool): Promise<void> {
-  const sql = await readFile(resolve("apps/api/migrations/001-platform.sql"), "utf8");
+  const migrations = [
+    { version: 1, path: "apps/api/migrations/001-platform.sql" },
+    { version: 2, path: "apps/api/migrations/002-matchmaking.sql" },
+  ];
   await transaction(pool, async client => {
     await client.query("SELECT pg_advisory_xact_lock(1095652435)");
     await client.query("CREATE TABLE IF NOT EXISTS schema_migrations (version integer PRIMARY KEY)");
-    const applied = await client.query("SELECT version FROM schema_migrations WHERE version=1");
-    if (!applied.rowCount) {
-      await client.query(sql);
-      await client.query("INSERT INTO schema_migrations(version) VALUES (1)");
+    for (const migration of migrations) {
+      const applied = await client.query("SELECT version FROM schema_migrations WHERE version=$1", [migration.version]);
+      if (!applied.rowCount) {
+        const sql = await readFile(resolve(migration.path), "utf8");
+        await client.query(sql);
+        await client.query("INSERT INTO schema_migrations(version) VALUES ($1)", [migration.version]);
+      }
     }
   });
 }

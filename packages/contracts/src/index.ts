@@ -41,6 +41,31 @@ export const profileCommandSchema = z.strictObject({
 });
 export const deletionCommandSchema = z.strictObject({ confirmation: z.literal("DELETE") });
 
+export const matchmakingStatusSchema = z.enum([
+  "idle", "queued", "proposed", "accepted", "declined", "cancelled", "expired",
+]);
+export const matchmakingStateSchema = z.strictObject({
+  revision: integer,
+  status: matchmakingStatusSchema,
+  matchId: uuid.nullable(),
+  expiresAt: timestamp.nullable(),
+  accepted: z.boolean(),
+}).superRefine((state, ctx) => {
+  const active = state.status === "proposed" || state.status === "accepted";
+  if (
+    (active && state.matchId === null) ||
+    (state.status === "proposed" && state.expiresAt === null) ||
+    (state.status === "accepted" && (state.expiresAt !== null || !state.accepted)) ||
+    (!active && (state.matchId !== null || state.expiresAt !== null || state.accepted))
+  ) {
+    ctx.addIssue({ code: "custom", message: "Matchmaking state fields do not match its lifecycle status." });
+  }
+});
+export const matchmakingRevisionCommandSchema = z.strictObject({ expectedRevision: integer });
+export const matchmakingProposalCommandSchema = z.strictObject({
+  expectedRevision: integer, matchId: uuid,
+});
+
 export const lockedChoiceSchema = z.strictObject({
   accountId: uuid.nullable(), animalId, level: integer.min(1),
   statistics: z.strictObject({ vitality: integer, power: integer, guard: integer, speed: integer }),
@@ -87,11 +112,14 @@ export const battleSchema = battleDefinitionSchema.extend({
 });
 export const snapshotSchema = z.strictObject({
   account: accountSchema,
+  matchmaking: matchmakingStateSchema,
   battles: z.array(battleSchema),
   pendingBattles: z.array(battleDefinitionSchema),
   serverTime: timestamp,
 });
 
+/** Account-scoped matchmaking state with a revision independent from account progress. */
+export type MatchmakingState = z.infer<typeof matchmakingStateSchema>;
 /** Authoritative snapshot read from PostgreSQL; never a client write payload. */
 export type Snapshot = z.infer<typeof snapshotSchema>;
 /** Server-authored replay record, including frozen inputs and ordered results. */

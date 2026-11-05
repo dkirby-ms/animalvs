@@ -5,7 +5,9 @@ import { execFileSync } from "node:child_process";
 import { Pool } from "pg";
 import { createServer, type Server } from "node:http";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import { accountSchema, battleDefinitionSchema, snapshotSchema, type Battle } from "../packages/contracts/src/index.js";
+import {
+  accountSchema, battleDefinitionSchema, matchmakingStateSchema, snapshotSchema, type Battle,
+} from "../packages/contracts/src/index.js";
 import { databasePool, migrate } from "../apps/api/src/database.js";
 import { PlayerStore } from "../apps/api/src/store.js";
 import { createApp } from "../apps/api/src/app.js";
@@ -96,6 +98,8 @@ test("stable identity, initial six animals, explicit unauthenticated and tamperi
   const snapshot = snapshotSchema.parse(await (await request("/api/snapshot")).json());
   assert.equal(snapshot.account.animals.length, 6);
   assert.equal(snapshot.account.economy.turns, 24);
+  assert.equal(snapshot.matchmaking.status, "idle");
+  assert.equal(snapshot.matchmaking.revision, 0);
   assert.equal((await request("/api/snapshot", "invalid")).status, 401);
   assert.equal((await request(`/api/snapshot?accountId=${b}`)).status, 400);
   const command = { transactionId: randomUUID(), expectedRevision: 0, displayName: "Player A" };
@@ -105,6 +109,107 @@ test("stable identity, initial six animals, explicit unauthenticated and tamperi
   for (const path of ["/api/battles", "/api/queue", `/api/accounts/${b}`]) {
     assert.equal((await request(path, "a", { method: "POST", body: "{}" })).status, 404);
   }
+});
+
+test("matchmaking commands are account-scoped, revision-checked and recover persisted lifecycle state", async () => {
+  const initialA = await store.snapshot(a);
+  const initialB = await store.snapshot(b);
+  const accountRevision = initialA.account.revision;
+  assert.equal((await request("/api/matchmaking/enqueue", "a", {
+    method: "POST", body: JSON.stringify({ expectedRevision: initialA.matchmaking.revision, accountId: b }),
+  })).status, 400);
+  assert.equal((await request("/api/matchmaking/propose", "a", {
+    method: "POST", body: "{}",
+  })).status, 404);
+
+  const queuedA = await request("/api/matchmaking/enqueue", "a", {
+    method: "POST", body: JSON.stringify({ expectedRevision: initialA.matchmaking.revision }),
+  });
+  const queuedB = await request("/api/matchmaking/enqueue", "b", {
+    method: "POST", body: JSON.stringify({ expectedRevision: initialB.matchmaking.revision }),
+  });
+  assert.equal(queuedA.status, 200);
+  assert.equal(queuedB.status, 200);
+  const queuedAState = matchmakingStateSchema.parse(await queuedA.json());
+  const retriedEnqueue = await request("/api/matchmaking/enqueue", "a", {
+    method: "POST", body: JSON.stringify({ expectedRevision: queuedAState.revision }),
+  });
+  assert.equal((await retriedEnqueue.json() as { revision: number }).revision, queuedAState.revision);
+  const initialC = await store.snapshot(outsider);
+  const concurrentEnqueues = await Promise.all([1, 2].map(() => request("/api/matchmaking/enqueue", "c", {
+    method: "POST", body: JSON.stringify({ expectedRevision: initialC.matchmaking.revision }),
+  })));
+  assert.deepEqual(concurrentEnqueues.map(response => response.status).sort(), [200, 409]);
+  assert.equal((await store.snapshot(outsider)).matchmaking.revision, initialC.matchmaking.revision + 1);
+  assert.equal((await store.snapshot(a)).account.revision, accountRevision);
+
+  let proposal = await store.proposeMatch(a, b);
+  assert.ok(proposal.every(state => state.status === "proposed" && state.matchId === proposal[0]!.matchId));
+  assert.ok(Date.parse(proposal[0]!.expiresAt!) > Date.now() + 55_000);
+  const proposedA = await store.snapshot(a);
+  assert.equal((await request("/api/matchmaking/accept", "c", {
+    method: "POST",
+    body: JSON.stringify({ matchId: proposal[0]!.matchId, expectedRevision: 0 }),
+  })).status, 409);
+
+  const acceptedA = await request("/api/matchmaking/accept", "a", {
+    method: "POST",
+    body: JSON.stringify({ matchId: proposal[0]!.matchId, expectedRevision: proposedA.matchmaking.revision }),
+  });
+  assert.equal(acceptedA.status, 200);
+  const acceptedAState = matchmakingStateSchema.parse(await acceptedA.json());
+  assert.equal(acceptedAState.status, "proposed");
+  assert.equal(acceptedAState.accepted, true);
+  const proposedB = await store.snapshot(b);
+  const acceptedB = await request("/api/matchmaking/accept", "b", {
+    method: "POST",
+    body: JSON.stringify({ matchId: acceptedAState.matchId!, expectedRevision: proposedB.matchmaking.revision }),
+  });
+  assert.equal(acceptedB.status, 200);
+  assert.equal((await acceptedB.json() as { status: string }).status, "accepted");
+  assert.equal((await store.snapshot(a)).matchmaking.status, "accepted");
+
+  for (const [accountId, player] of [[a, "a"], [b, "b"]] as const) {
+    const state = await store.snapshot(accountId);
+    assert.equal((await request("/api/matchmaking/enqueue", player, {
+      method: "POST", body: JSON.stringify({ expectedRevision: state.matchmaking.revision }),
+    })).status, 200);
+  }
+  proposal = await store.proposeMatch(a, b);
+  const proposedForDecline = await store.snapshot(a);
+  const declined = await request("/api/matchmaking/decline", "a", {
+    method: "POST",
+    body: JSON.stringify({
+      matchId: proposal[0]!.matchId, expectedRevision: proposedForDecline.matchmaking.revision,
+    }),
+  });
+  assert.equal(declined.status, 200);
+  assert.equal((await declined.json() as { status: string }).status, "declined");
+  assert.equal((await store.snapshot(b)).matchmaking.status, "declined");
+
+  for (const [accountId, player] of [[a, "a"], [b, "b"]] as const) {
+    const state = await store.snapshot(accountId);
+    assert.equal((await request("/api/matchmaking/enqueue", player, {
+      method: "POST", body: JSON.stringify({ expectedRevision: state.matchmaking.revision }),
+    })).status, 200);
+  }
+  proposal = await store.proposeMatch(a, b);
+  await pool.query("UPDATE matchmaking_state SET expires_at=now()-interval '1 second' WHERE match_id=$1", [
+    proposal[0]!.matchId,
+  ]);
+  assert.equal((await store.snapshot(a)).matchmaking.status, "expired");
+  assert.equal((await store.snapshot(b)).matchmaking.status, "expired");
+
+  const queuedAgain = await store.snapshot(a);
+  assert.equal((await request("/api/matchmaking/enqueue", "a", {
+    method: "POST", body: JSON.stringify({ expectedRevision: queuedAgain.matchmaking.revision }),
+  })).status, 200);
+  const queuedState = await store.snapshot(a);
+  assert.equal((await request("/api/matchmaking/cancel", "a", {
+    method: "POST", body: JSON.stringify({ expectedRevision: queuedState.matchmaking.revision }),
+  })).status, 200);
+  assert.equal((await store.snapshot(a)).matchmaking.status, "cancelled");
+  assert.equal((await store.snapshot(a)).account.revision, accountRevision);
 });
 
 test("management is idempotent, stale-safe, concurrent and transactional", async () => {
@@ -183,6 +288,14 @@ test("authenticated SSE sends fresh authoritative snapshots on connect and chang
       updated += new TextDecoder().decode((await reader.read()).value);
     }
     assert.match(updated, /Recovered Keeper/);
+    const current = await store.snapshot(a);
+    await store.enqueueMatchmaking(a, current.matchmaking.revision);
+    let matchmakingUpdate = "";
+    for (let attempt = 0; attempt < 20 && !matchmakingUpdate.includes('"status":"queued"'); attempt++) {
+      matchmakingUpdate += new TextDecoder().decode((await reader.read()).value);
+    }
+    assert.match(matchmakingUpdate, /"status":"queued"/);
+    assert.equal((await store.snapshot(a)).account.revision, current.account.revision);
   } finally {
     await reader.cancel();
     controller.abort();
@@ -190,7 +303,12 @@ test("authenticated SSE sends fresh authoritative snapshots on connect and chang
 });
 
 test("API/pool restart (and isolated PostgreSQL restart) recover records without granting twice", async () => {
+  const beforeProposal = await store.snapshot(b);
+  await store.enqueueMatchmaking(b, beforeProposal.matchmaking.revision);
+  const proposal = await store.proposeMatch(a, b);
   const snapshot = await store.snapshot(a);
+  const expiresAt = snapshot.matchmaking.expiresAt;
+  assert.equal(snapshot.matchmaking.status, "proposed");
   await close(server);
   await pool.end();
   await admin.end();
@@ -206,11 +324,26 @@ test("API/pool restart (and isolated PostgreSQL restart) recover records without
   await startApi();
   const recovered = await store.snapshot(a);
   assert.deepEqual(recovered.account, snapshot.account);
+  assert.deepEqual(recovered.matchmaking, snapshot.matchmaking);
+  assert.equal(recovered.matchmaking.expiresAt, expiresAt);
+  assert.equal(recovered.matchmaking.matchId, proposal[0]!.matchId);
   assert.deepEqual(recovered.battles, snapshot.battles);
   assert.deepEqual(recovered.pendingBattles, snapshot.pendingBattles);
 });
 
 test("deletion removes linked records and prevents silent recreation", async () => {
+  let matchmakingA = await store.snapshot(a);
+  let matchmakingB = await store.snapshot(b);
+  if (matchmakingA.matchmaking.status === "proposed") {
+    await store.declineMatchmaking(
+      a, matchmakingA.matchmaking.matchId!, matchmakingA.matchmaking.revision,
+    );
+    matchmakingA = await store.snapshot(a);
+    matchmakingB = await store.snapshot(b);
+  }
+  await store.enqueueMatchmaking(a, matchmakingA.matchmaking.revision);
+  await store.enqueueMatchmaking(b, matchmakingB.matchmaking.revision);
+  const proposal = await store.proposeMatch(a, b);
   await store.reserveBattle(definition(), "2026-11-05", { account: 1, pair: 1 });
   const account = (await store.snapshot(a)).account;
   accountSchema.parse(account);
@@ -219,10 +352,12 @@ test("deletion removes linked records and prevents silent recreation", async () 
   await assert.rejects(store.snapshot(a));
   await assert.rejects(store.accountFor(identities.a));
   assert.equal((await store.snapshot(b)).battles.length, 0);
-  for (const table of ["accounts", "management_transactions", "reservation_accounts", "reward_counters"]) {
+  for (const table of ["accounts", "management_transactions", "reservation_accounts", "reward_counters", "matchmaking_state"]) {
     const column = table === "accounts" ? "id" : "account_id";
     assert.equal((await pool.query(`SELECT count(*)::int AS count FROM ${table} WHERE ${column}=$1`, [a])).rows[0].count, 0);
   }
+  assert.equal((await store.snapshot(b)).matchmaking.status, "cancelled");
+  assert.equal(proposal[0]!.status, "proposed");
   assert.equal((await pool.query("SELECT count(*)::int AS count FROM battle_reservations")).rows[0].count, 0);
   assert.equal((await pool.query("SELECT count(*)::int AS count FROM pair_reward_counters")).rows[0].count, 0);
   assert.equal((await pool.query("SELECT sum(reserved)::int AS count FROM reward_counters WHERE account_id=$1", [b])).rows[0].count, 0);

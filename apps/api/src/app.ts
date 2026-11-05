@@ -3,7 +3,9 @@ import express, { type ErrorRequestHandler } from "express";
 import helmet from "helmet";
 import { SpanKind, trace } from "@opentelemetry/api";
 import { z } from "zod";
-import { deletionCommandSchema, uuid } from "../../../packages/contracts/src/index.js";
+import {
+  deletionCommandSchema, matchmakingProposalCommandSchema, matchmakingRevisionCommandSchema, uuid,
+} from "../../../packages/contracts/src/index.js";
 import type { Authenticate, Identity } from "./auth.js";
 import { PlatformError } from "./errors.js";
 import type { PlayerStore } from "./store.js";
@@ -62,6 +64,24 @@ export function createApp(store: PlayerStore, authenticate: Authenticate, option
   app.get("/api/battles/:id", async (request, response) => {
     response.json(await store.battle(response.locals.accountId, uuid.parse(request.params.id)));
   });
+  app.post("/api/matchmaking/enqueue", async (request, response) => {
+    const command = matchmakingRevisionCommandSchema.parse(request.body);
+    response.json(await store.enqueueMatchmaking(response.locals.accountId, command.expectedRevision));
+  });
+  app.post("/api/matchmaking/cancel", async (request, response) => {
+    const command = matchmakingRevisionCommandSchema.parse(request.body);
+    response.json(await store.cancelMatchmaking(response.locals.accountId, command.expectedRevision));
+  });
+  app.post("/api/matchmaking/accept", async (request, response) => {
+    const command = matchmakingProposalCommandSchema.parse(request.body);
+    response.json(await store.acceptMatchmaking(
+      response.locals.accountId, command.matchId, command.expectedRevision));
+  });
+  app.post("/api/matchmaking/decline", async (request, response) => {
+    const command = matchmakingProposalCommandSchema.parse(request.body);
+    response.json(await store.declineMatchmaking(
+      response.locals.accountId, command.matchId, command.expectedRevision));
+  });
   app.patch("/api/profile", async (request, response) => {
     response.json(await store.profile(response.locals.accountId, request.body));
   });
@@ -80,15 +100,18 @@ export function createApp(store: PlayerStore, authenticate: Authenticate, option
       });
       response.flushHeaders();
       response.write(`event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`);
-      let revision = snapshot.account.revision;
+      let accountRevision = snapshot.account.revision;
+      let matchmakingRevision = snapshot.matchmaking.revision;
       while (active) {
         await new Promise(resolve => setTimeout(resolve, options.streamIntervalMs ?? 1000));
         if (!active) break;
         // Revalidate access so an expired/revoked credential cannot keep a stream alive indefinitely.
         await authenticate(request);
         snapshot = await store.snapshot(response.locals.accountId);
-        if (snapshot.account.revision !== revision) {
-          revision = snapshot.account.revision;
+        if (snapshot.account.revision !== accountRevision ||
+            snapshot.matchmaking.revision !== matchmakingRevision) {
+          accountRevision = snapshot.account.revision;
+          matchmakingRevision = snapshot.matchmaking.revision;
           if (!response.write(`event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`)) break;
         } else if (!response.write(": heartbeat\n\n")) break;
       }

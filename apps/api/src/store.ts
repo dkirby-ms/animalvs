@@ -2,14 +2,18 @@ import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import {
-  accountSchema, animalIds, battleDefinitionSchema, battleSchema, profileCommandSchema,
-  snapshotSchema, uuid, type Battle, type PlayerAccount, type Snapshot,
+  accountSchema, animalIds, battleDefinitionSchema, battleSchema, matchmakingStateSchema,
+  profileCommandSchema, snapshotSchema, uuid, type Battle, type MatchmakingState, type PlayerAccount, type Snapshot,
 } from "../../../packages/contracts/src/index.js";
 import type { Identity } from "./auth.js";
 import { transaction } from "./database.js";
 import { PlatformError } from "./errors.js";
 
 type AccountRow = { id: string; state: unknown; revision: number };
+type MatchmakingRow = {
+  account_id: string; status: MatchmakingState["status"]; revision: number; match_id: string | null;
+  expires_at: Date | string | null; accepted: boolean;
+};
 type Definition = z.infer<typeof battleDefinitionSchema>;
 const notFound = () => new PlatformError(404, "not_found", "The requested player record is unavailable.");
 const conflict = () => new PlatformError(409, "stale_action", "Progress changed. Reload before trying again.");
@@ -20,6 +24,17 @@ const limitsSchema = z.strictObject({ account: z.number().int().positive(), pair
 
 function decode(row: AccountRow): PlayerAccount {
   return accountSchema.parse({ ...z.record(z.string(), z.unknown()).parse(row.state), id: row.id, revision: row.revision });
+}
+
+function matchmakingProjection(row: MatchmakingRow): MatchmakingState {
+  return matchmakingStateSchema.parse({
+    revision: row.revision,
+    status: row.status,
+    matchId: row.match_id,
+    expiresAt: row.expires_at === null ? null :
+      row.expires_at instanceof Date ? row.expires_at.toISOString() : new Date(row.expires_at).toISOString(),
+    accepted: row.accepted,
+  });
 }
 
 async function loadLocked(client: PoolClient, id: string): Promise<PlayerAccount> {
@@ -46,7 +61,24 @@ function participants(definition: Definition) {
   return ids;
 }
 
-/** PostgreSQL authority boundary. Only profile intent is public; gameplay mutations are trusted server calls. */
+async function expireProposal(client: PoolClient, accountId: string): Promise<void> {
+  const result = await client.query<MatchmakingRow>(
+    `SELECT account_id,status,revision,match_id,expires_at,accepted FROM matchmaking_state
+     WHERE account_id=$1 AND status='proposed' AND expires_at <= now()`, [accountId]);
+  const state = result.rows[0];
+  if (!state?.match_id) return;
+  const pair = await client.query<MatchmakingRow>(
+    `SELECT account_id,status,revision,match_id,expires_at,accepted FROM matchmaking_state
+     WHERE match_id=$1 AND status='proposed' ORDER BY account_id FOR UPDATE`, [state.match_id]);
+  if (pair.rows.length !== 2) return;
+  await client.query(
+    `UPDATE matchmaking_state
+     SET status='expired',revision=revision+1,match_id=NULL,opponent_account_id=NULL,
+         expires_at=NULL,accepted=false
+     WHERE match_id=$1 AND status='proposed' AND expires_at <= now()`, [state.match_id]);
+}
+
+/** PostgreSQL authority boundary for profile, matchmaking, and trusted gameplay state. */
 export class PlayerStore {
   constructor(private readonly pool: Pool, private readonly namespace: "local" | "entra") {}
 
@@ -71,6 +103,7 @@ export class PlayerStore {
       accountSchema.parse({ ...state, id, revision: 0 });
       await client.query("INSERT INTO accounts(id,issuer,subject,namespace,state) VALUES($1,$2,$3,$4,$5)",
         [id, identity.issuer, identity.subject, this.namespace, state]);
+      await client.query("INSERT INTO matchmaking_state(account_id) VALUES($1)", [id]);
       return id;
     });
   }
@@ -78,10 +111,15 @@ export class PlayerStore {
   /** Read a consistent authoritative snapshot. Recovery never invokes a game engine or grants rewards. */
   async snapshot(accountId: string): Promise<Snapshot> {
     return transaction(this.pool, async client => {
-      await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      await client.query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ");
+      await expireProposal(client, accountId);
       const result = await client.query<AccountRow>("SELECT id,state,revision FROM accounts WHERE id=$1", [accountId]);
       const row = result.rows[0];
       if (!row) throw notFound();
+      const matchmaking = await client.query<MatchmakingRow>(
+        `SELECT account_id,status,revision,match_id,expires_at,accepted
+         FROM matchmaking_state WHERE account_id=$1`, [accountId]);
+      if (!matchmaking.rows[0]) throw notFound();
       const completed = await client.query<{ record: unknown }>(
         `SELECT b.record FROM battles b JOIN reservation_accounts p ON p.battle_id=b.id
          WHERE p.account_id=$1 ORDER BY b.record->>'completedAt' DESC LIMIT 50`, [accountId]);
@@ -89,9 +127,156 @@ export class PlayerStore {
         `SELECT r.definition FROM battle_reservations r JOIN reservation_accounts p USING(battle_id)
          WHERE p.account_id=$1 AND r.status='reserved' ORDER BY r.battle_id`, [accountId]);
       return snapshotSchema.parse({
-        account: decode(row), battles: completed.rows.map(item => item.record),
+        account: decode(row), matchmaking: matchmakingProjection(matchmaking.rows[0]), battles: completed.rows.map(item => item.record),
         pendingBattles: pending.rows.map(item => item.definition), serverTime: new Date().toISOString(),
       });
+    });
+  }
+
+  /** Queue the authenticated account at its current matchmaking revision. */
+  async enqueueMatchmaking(accountId: string, expectedRevision: number): Promise<MatchmakingState> {
+    return this.updateQueueState(accountId, expectedRevision, "queued");
+  }
+
+  /** Leave a queue only when the authenticated account still owns the expected queued state. */
+  async cancelMatchmaking(accountId: string, expectedRevision: number): Promise<MatchmakingState> {
+    return this.updateQueueState(accountId, expectedRevision, "cancelled");
+  }
+
+  private async updateQueueState(
+    accountId: string, expectedRevision: number, next: "queued" | "cancelled",
+  ): Promise<MatchmakingState> {
+    return transaction(this.pool, async client => {
+      await client.query("SELECT id FROM accounts WHERE id=$1 FOR UPDATE", [accountId]);
+      const result = await client.query<MatchmakingRow>(
+        `SELECT account_id,status,revision,match_id,expires_at,accepted
+         FROM matchmaking_state WHERE account_id=$1 FOR UPDATE`, [accountId]);
+      const current = result.rows[0];
+      if (!current) throw notFound();
+      if (current.revision !== expectedRevision) throw conflict();
+      if (next === "queued" && current.status === "queued") return matchmakingProjection(current);
+      if (next === "cancelled" && current.status === "cancelled") return matchmakingProjection(current);
+      const allowed = next === "queued"
+        ? ["idle", "accepted", "declined", "cancelled", "expired"]
+        : ["queued"];
+      if (!allowed.includes(current.status)) throw conflict();
+      const updated = await client.query<MatchmakingRow>(
+        `UPDATE matchmaking_state
+         SET status=$2,revision=revision+1,match_id=NULL,opponent_account_id=NULL,
+             expires_at=NULL,accepted=false
+         WHERE account_id=$1
+         RETURNING account_id,status,revision,match_id,expires_at,accepted`, [accountId, next]);
+      return matchmakingProjection(updated.rows[0]!);
+    });
+  }
+
+  /**
+   * Create a proposal for two accounts already in the queue.
+   *
+   * @returns Both account-scoped proposal states, ordered by account ID.
+   * @throws A `PlatformError` when either account is missing or no longer queued.
+   */
+  async proposeMatch(firstAccountId: string, secondAccountId: string): Promise<MatchmakingState[]> {
+    const ids = [uuid.parse(firstAccountId), uuid.parse(secondAccountId)].sort();
+    if (ids[0] === ids[1]) throw new PlatformError(422, "invalid_match", "A proposal requires two different players.");
+    const matchId = randomUUID();
+    const expiresAt = new Date(Date.now() + 60_000);
+    return transaction(this.pool, async client => {
+      const accounts = await client.query<{ id: string }>(
+        "SELECT id FROM accounts WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE", [ids]);
+      if (accounts.rowCount !== 2) throw notFound();
+      const states = await client.query<MatchmakingRow>(
+        `SELECT account_id,status,revision,match_id,expires_at,accepted
+         FROM matchmaking_state WHERE account_id=ANY($1::uuid[]) ORDER BY account_id FOR UPDATE`, [ids]);
+      if (states.rowCount !== 2 || states.rows.some(state => state.status !== "queued")) throw conflict();
+      await client.query(
+        `UPDATE matchmaking_state AS state
+         SET status='proposed',revision=state.revision+1,match_id=$2,
+             opponent_account_id=CASE WHEN state.account_id=$3 THEN $4::uuid ELSE $3::uuid END,
+             expires_at=$5,accepted=false
+         WHERE state.account_id=ANY($1::uuid[])`, [ids, matchId, ids[0], ids[1], expiresAt]);
+      const updated = await client.query<MatchmakingRow>(
+        `SELECT account_id,status,revision,match_id,expires_at,accepted
+         FROM matchmaking_state WHERE account_id=ANY($1::uuid[]) ORDER BY account_id`, [ids]);
+      return updated.rows.map(matchmakingProjection);
+    });
+  }
+
+  /** Accept the matching proposal only for the authenticated account and its current revision. */
+  async acceptMatchmaking(
+    accountId: string, matchId: string, expectedRevision: number,
+  ): Promise<MatchmakingState> {
+    return this.respondToProposal(accountId, matchId, expectedRevision, "accept");
+  }
+
+  /** Decline the matching proposal for both participants without exposing account identifiers. */
+  async declineMatchmaking(
+    accountId: string, matchId: string, expectedRevision: number,
+  ): Promise<MatchmakingState> {
+    return this.respondToProposal(accountId, matchId, expectedRevision, "decline");
+  }
+
+  private async respondToProposal(
+    accountId: string, matchId: string, expectedRevision: number, response: "accept" | "decline",
+  ): Promise<MatchmakingState> {
+    uuid.parse(accountId);
+    uuid.parse(matchId);
+    return transaction(this.pool, async client => {
+      const initial = await client.query<MatchmakingRow & { opponent_account_id: string | null }>(
+        `SELECT account_id,status,revision,match_id,opponent_account_id,expires_at,accepted
+         FROM matchmaking_state WHERE account_id=$1`, [accountId]);
+      const initialState = initial.rows[0];
+      if (!initialState?.opponent_account_id || initialState.match_id !== matchId) throw conflict();
+      const ids = [accountId, initialState.opponent_account_id].sort();
+      const accounts = await client.query<{ id: string }>(
+        "SELECT id FROM accounts WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE", [ids]);
+      if (accounts.rowCount !== 2) throw notFound();
+      const locked = await client.query<MatchmakingRow & { opponent_account_id: string | null; is_expired: boolean }>(
+        `SELECT account_id,status,revision,match_id,opponent_account_id,expires_at,accepted,
+                expires_at <= now() AS is_expired
+         FROM matchmaking_state WHERE account_id=ANY($1::uuid[]) ORDER BY account_id FOR UPDATE`, [ids]);
+      const own = locked.rows.find(state => state.account_id === accountId);
+      const other = locked.rows.find(state => state.account_id !== accountId);
+      if (!own || !other || own.match_id !== matchId || other.match_id !== matchId ||
+          own.opponent_account_id !== other.account_id || other.opponent_account_id !== own.account_id) {
+        throw conflict();
+      }
+      if (own.status === "proposed" && own.is_expired) {
+        await client.query(
+          `UPDATE matchmaking_state
+           SET status='expired',revision=revision+1,match_id=NULL,opponent_account_id=NULL,
+               expires_at=NULL,accepted=false
+           WHERE account_id=ANY($1::uuid[]) AND match_id=$2 AND status='proposed'
+             AND expires_at <= now()`, [ids, matchId]);
+        const expired = await client.query<MatchmakingRow>(
+          `SELECT account_id,status,revision,match_id,expires_at,accepted
+           FROM matchmaking_state WHERE account_id=$1`, [accountId]);
+        return matchmakingProjection(expired.rows[0]!);
+      }
+      if (own.revision !== expectedRevision || own.status !== "proposed" ||
+          other.status !== "proposed" && other.status !== "accepted") throw conflict();
+      if (response === "decline") {
+        await client.query(
+          `UPDATE matchmaking_state
+           SET status='declined',revision=revision+1,match_id=NULL,opponent_account_id=NULL,
+               expires_at=NULL,accepted=false
+           WHERE account_id=ANY($1::uuid[]) AND match_id=$2`, [ids, matchId]);
+      } else if (other.status === "accepted" || other.accepted) {
+        await client.query(
+          `UPDATE matchmaking_state
+           SET status='accepted',revision=revision+1,expires_at=NULL,accepted=true
+           WHERE account_id=ANY($1::uuid[]) AND match_id=$2`, [ids, matchId]);
+      } else if (own.accepted) {
+        return matchmakingProjection(own);
+      } else {
+        await client.query(
+          `UPDATE matchmaking_state SET revision=revision+1,accepted=true
+           WHERE account_id=$1 AND match_id=$2`, [accountId, matchId]);
+      }
+      const updated = await client.query<MatchmakingRow>(
+        `SELECT account_id,status,revision,match_id,expires_at,accepted
+         FROM matchmaking_state WHERE account_id=$1`, [accountId]);
+      return matchmakingProjection(updated.rows[0]!);
     });
   }
 
@@ -235,7 +420,10 @@ export class PlayerStore {
       const related = await client.query<{ account_id: string }>(
         `SELECT DISTINCT p.account_id FROM reservation_accounts p
          WHERE p.battle_id IN (SELECT battle_id FROM reservation_accounts WHERE account_id=$1)
-         UNION SELECT id FROM accounts WHERE id=$1 ORDER BY account_id`, [accountId]);
+         UNION SELECT id FROM accounts WHERE id=$1
+         UNION SELECT opponent_account_id FROM matchmaking_state
+           WHERE account_id=$1 AND opponent_account_id IS NOT NULL
+         ORDER BY account_id`, [accountId]);
       for (const row of related.rows) await loadLocked(client, row.account_id);
       const owned = await client.query("SELECT id FROM accounts WHERE id=$1 AND issuer=$2 AND subject=$3",
         [accountId, identity.issuer, identity.subject]);
@@ -254,6 +442,11 @@ export class PlayerStore {
       await client.query(
         `DELETE FROM battle_reservations WHERE battle_id IN
          (SELECT battle_id FROM reservation_accounts WHERE account_id=$1)`, [accountId]);
+      await client.query(
+        `UPDATE matchmaking_state
+         SET status='cancelled',revision=revision+1,match_id=NULL,opponent_account_id=NULL,
+             expires_at=NULL,accepted=false
+         WHERE account_id<>$1 AND opponent_account_id=$1`, [accountId]);
       for (const row of related.rows) if (row.account_id !== accountId) {
         await writeAccount(client, await loadLocked(client, row.account_id));
       }

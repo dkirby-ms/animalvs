@@ -7,7 +7,11 @@ description: Local Vue and TypeScript player platform backed by PostgreSQL.
 
 The browser displays authoritative account, roster, facility and stored battle
 state. Express owns identity and access checks; PostgreSQL owns persistence.
-Gameplay engines, matchmaking and facility mechanics are not implemented yet.
+The platform includes an account-scoped matchmaking lifecycle, authenticated
+commands, live updates and reconnect recovery. Participant selection, CPU
+fallback, combat and facility mechanics are not implemented. Issue #25 remains
+open; broader #27 privacy, retention, backup and deletion-policy work is
+deferred. Hosting cost and SSE connection capacity are not validated.
 
 ## Run locally
 
@@ -39,6 +43,12 @@ Sign out and select the same player to recover saved progress.
 
 Without Docker, create a dedicated local PostgreSQL database ending in `_dev`
 and set `DATABASE_URL` accordingly. Do not use shared or production databases.
+
+For interactive Entra testing during development, keep the same dedicated
+loopback `_dev` database and run `LOCAL_AUTH_ENABLED=false npm run dev:api`.
+The development API then validates real Entra access tokens but still binds
+only to loopback. Local simulated players remain the default when
+`LOCAL_AUTH_ENABLED=true`; no production service or deployment is involved.
 
 ## Verify
 
